@@ -1,6 +1,7 @@
 from copy import deepcopy
+from typing import Dict, Any
 
-CL_DEFAULTS = dict(
+CL_DEFAULTS: Dict[str, Any] = dict(
   tasks=None,
   task_list=None,
   seed=0,
@@ -38,7 +39,7 @@ CL_DEFAULTS = dict(
   critic_reg_coef=1.,
 )
 
-MT_DEFAULTS = dict(
+MT_DEFAULTS: Dict[str, Any] = dict(
   tasks=None,
   task_list=None,
   seed=0,
@@ -60,7 +61,7 @@ MT_DEFAULTS = dict(
   target_output_std=0.089,
 )
 
-SINGLE_DEFAULTS = dict(
+SINGLE_DEFAULTS: Dict[str, Any] = dict(
   seed=0,
   steps=int(1e6),
   replay_size=int(1e6),
@@ -77,7 +78,7 @@ SINGLE_DEFAULTS = dict(
 )
 
 
-def combine_config_with_defaults(config, run_kind):
+def combine_config_with_defaults(config: Dict, run_kind: str):
   if run_kind == 'cl':
     res = deepcopy(CL_DEFAULTS)
   elif run_kind == 'mt':
@@ -87,7 +88,8 @@ def combine_config_with_defaults(config, run_kind):
   else:
     assert False, 'bad run_kind!'
 
-  for k, v in config.items():
-    res[k] = v
+  res.update(config)
+  # for k, v in config.items():
+  #   res[k] = v
 
   return res
