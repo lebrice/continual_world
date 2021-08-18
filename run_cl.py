@@ -21,14 +21,15 @@ except ImportError:
 
 @dataclass
 class TaskConfig:
+    """ Configuration options for the task(s). """
     # Name of the sequence you want to run
-    tasks: str = choice(*list(task_seq_to_task_list.keys()))
+    tasks: str = choice(*list(task_seq_to_task_list.keys()))  # type: ignore
     # Types of logger used.
-    logger_output: List[Literal["neptune", "tensorboard", "tsv"]] = choice(
+    logger_output: List[Literal["neptune", "tensorboard", "tsv"]] = choice(  # type: ignore
         "neptune", "tensorboard", "tsv"
     )
     # Random seed used for running the experiments
-    seed: int
+    seed: int  # type: ignore
     # Numer of steps per task
     steps_per_task: int = field(default=int(1e6), type=sci2int)
     # Size of the replay buffer
@@ -45,6 +46,7 @@ class TaskConfig:
 
 @dataclass
 class AlgoConfig:
+    """ Configuration options for the Algorithm. """
     reset_buffer_on_task_change: bool = True
     reset_optimizer_on_task_change: bool = True
     reset_critic_on_task_change: bool = False
@@ -55,7 +57,7 @@ class AlgoConfig:
     lr: float = 1e-3
     alpha: str = "auto"
     use_popart: bool = False
-    cl_method: Optional[str] = choice(
+    cl_method: Optional[str] = choice(  # type: ignore
         None, "l2", "ewc", "mas", "vcl", "packnet", "agem", default=None
     )
     packnet_retrain_steps: int = 0
