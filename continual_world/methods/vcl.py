@@ -6,8 +6,8 @@ import tensorflow.keras as tfk
 from tensorflow.keras import Input, Model
 from tensorflow.python.ops import nn
 
-from envs import MW_OBS_LEN, MW_ACT_LEN
-from spinup.models import apply_squashing_func, gaussian_likelihood, _choose_head
+from continual_world.envs import MW_OBS_LEN, MW_ACT_LEN
+from continual_world.spinup.models import apply_squashing_func, gaussian_likelihood, _choose_head
 
 EPS = 1e-8
 

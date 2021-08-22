@@ -1,11 +1,11 @@
 import argparse
-from envs import get_single_env, get_cl_env
-from methods.vcl import VclMlpActor
-from spinup.models import MlpActor, MlpCritic, PopArtMlpCritic
-from spinup.utils.logx import EpochLogger
-from spinup.sac import sac
-from task_lists import task_seq_to_task_list
-from utils.utils import get_activation_from_str, sci2int, str2bool
+from continual_world.envs import get_single_env, get_cl_env
+from continual_world.methods.vcl import VclMlpActor
+from continual_world.spinup.models import MlpActor, MlpCritic, PopArtMlpCritic
+from continual_world.spinup.utils.logx import EpochLogger
+from continual_world.spinup.sac import sac
+from continual_world.task_lists import task_seq_to_task_list
+from continual_world.utils.utils import get_activation_from_str, sci2int, str2bool
 
 from dataclasses import asdict
 from simple_parsing import ArgumentParser
@@ -91,6 +91,17 @@ def main(logger: EpochLogger, task_config: TaskConfig, algo_config: AlgoConfig):
         algo_config.div_by_return,
         randomization=algo_config.randomization,
     )
+    # TODO: Testing out if we can swap out their env with ours instead:
+    # TODO: Move the MT10 benchmarks to DiscreteTaskAgnosticRLSetting rather than
+    # IncrementalRLSetting so that we can have a single env for all tasks in sequence.
+    # BUG: When using MT10 as the dataset, we get an error with `self.test_steps_per_task` at line 302 (assert)
+    from sequoia.settings.rl import IncrementalRLSetting
+    setting = IncrementalRLSetting(dataset="CW10")
+    train_env_sequoia = setting.train_dataloader()
+    
+    # TODO: Add a wrapper so that both can be exactly the same!
+    assert False, (train_env.observation_space, train_env_sequoia.observation_space)
+
     # Consider normalizing test envs in the future.
     num_tasks = len(task_config.tasks)
     test_envs = [

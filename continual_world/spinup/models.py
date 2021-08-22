@@ -2,7 +2,7 @@ import numpy as np
 import tensorflow as tf
 
 from tensorflow.keras import Input, Model
-from envs import MW_ACT_LEN, MW_OBS_LEN
+from continual_world.envs import MW_ACT_LEN, MW_OBS_LEN
 
 EPS = 1e-8
 

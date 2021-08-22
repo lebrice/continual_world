@@ -16,7 +16,7 @@ import joblib
 import numpy as np
 import tensorflow as tf
 
-from spinup.utils.serialization_utils import convert_json
+from continual_world.spinup.utils.serialization_utils import convert_json
 
 color2num = dict(
     gray=30,

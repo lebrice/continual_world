@@ -1,16 +1,14 @@
 from copy import deepcopy
+from typing import List, Sequence, Union
 
 import gym
 import metaworld
 import numpy as np
+from gym import spaces
 from gym.wrappers import TimeLimit
-from typing import Union
-from utils.wrappers import (
-    ScaleReward,
-    SuccessCounter,
-    OneHotAdder,
-    RandomizationWrapper,
-)
+
+from continual_world.utils.wrappers import (OneHotAdder, RandomizationWrapper, ScaleReward,
+                            SuccessCounter)
 
 
 def get_mt50():
@@ -44,7 +42,7 @@ def set_simple_goal(env, name):
     env.set_task(goal)
 
 
-def get_subtasks(name):
+def get_subtasks(name: str) -> List[str]:
     return [s for s in MT50.train_tasks if s.env_name == name]
 
 
@@ -54,7 +52,7 @@ def get_mt50_idx(env):
     return idx[0]
 
 
-def get_single_env(task, one_hot_idx=0, one_hot_len=1, randomization="deterministic"):
+def get_single_env(task: Union[int, str], one_hot_idx: int=0, one_hot_len: int=1, randomization: str="deterministic"):
     task_name = get_task_name(task)
     env = MT50.train_classes[task_name]()
     env = RandomizationWrapper(env, get_subtasks(task_name), randomization)
@@ -74,13 +72,13 @@ def assert_equal_excluding_goal_dimensions(os1, os2):
     assert np.array_equal(os1.high[12:], os2.high[12:])
 
 
-def remove_goal_bounds(obs_space):
+def remove_goal_bounds(obs_space: spaces.Box) -> None:
     obs_space.low[9:12] = -np.inf
     obs_space.high[9:12] = np.inf
 
 
 class ContinualLearningEnv(gym.Env):
-    def __init__(self, envs, steps_per_env):
+    def __init__(self, envs: List[gym.Env], steps_per_env: int):
         for i in range(len(envs)):
             assert envs[0].action_space == envs[i].action_space
             assert_equal_excluding_goal_dimensions(
@@ -114,6 +112,7 @@ class ContinualLearningEnv(gym.Env):
     def step(self, action):
         self._check_steps_bound()
         obs, rew, done, info = self.envs[self.cur_seq_idx].step(action)
+        # NOTE: This gives the task ID as part of the 'info' dict.
         info["seq_idx"] = self.cur_seq_idx
 
         self.cur_step += 1
@@ -213,11 +212,11 @@ class MultiTaskEnv(gym.Env):
 
 
 def get_mt_env(
-    tasks,
-    steps_per_task,
-    scale_reward=False,
-    div_by_return=False,
-    randomization="deterministic",
+    tasks: Sequence[Union[str, int]],
+    steps_per_task: int,
+    scale_reward: bool=False,
+    div_by_return: bool=False,
+    randomization: str="deterministic",
 ):
     task_names = [get_task_name(task) for task in tasks]
     num_tasks = len(task_names)

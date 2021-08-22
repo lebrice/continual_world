@@ -1,4 +1,6 @@
-task_seq_to_task_list = {
+from typing import Dict, List
+
+task_seq_to_task_list: Dict[str, List[str]] = {
   'MT10': ['reach-v1', 'push-v1', 'pick-place-v1', 'door-open-v1',
            'drawer-open-v1', 'drawer-close-v1', 'button-press-topdown-v1',
            'peg-insert-side-v1', 'window-open-v1', 'window-close-v1'],

@@ -6,14 +6,14 @@ import time
 import numpy as np
 import tensorflow as tf
 
-from methods.agem import AgemHelper
-from methods.packnet import PackNetHelper
-from methods.regularization import L2Helper, EWCHelper, MASHelper
-from methods.vcl import VclHelper
-from spinup import models
-from spinup.models import PopArtMlpCritic
-from spinup.replay_buffers import EpisodicMemory, ReplayBuffer, ReservoirReplayBuffer
-from utils.utils import reset_optimizer, reset_weights
+from continual_world.methods.agem import AgemHelper
+from continual_world.methods.packnet import PackNetHelper
+from continual_world.methods.regularization import L2Helper, EWCHelper, MASHelper
+from continual_world.methods.vcl import VclHelper
+from continual_world.spinup import models
+from continual_world.spinup.models import PopArtMlpCritic
+from continual_world.spinup.replay_buffers import EpisodicMemory, ReplayBuffer, ReservoirReplayBuffer
+from continual_world.utils.utils import reset_optimizer, reset_weights
 
 
 def sac(env, test_envs, logger, actor_cl=models.MlpActor, actor_kwargs=None,
