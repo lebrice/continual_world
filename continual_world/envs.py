@@ -79,10 +79,10 @@ def remove_goal_bounds(obs_space: spaces.Box) -> None:
 
 class ContinualLearningEnv(gym.Env):
     def __init__(self, envs: List[gym.Env], steps_per_env: int):
-        for i in range(len(envs)):
-            assert envs[0].action_space == envs[i].action_space
+        for i, env in enumerate(envs):
+            assert env.action_space == envs[0].action_space
             assert_equal_excluding_goal_dimensions(
-                envs[0].observation_space, envs[i].observation_space
+                env.observation_space, envs[0].observation_space
             )
         self.action_space = envs[0].action_space
         self.observation_space = deepcopy(envs[0].observation_space)
