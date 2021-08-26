@@ -5,6 +5,7 @@ import random
 import time
 from dataclasses import asdict
 from typing import ClassVar, Dict, List, Optional, Type, Union, Any
+from tqdm import tqdm
 
 import gym
 from gym import spaces
@@ -55,7 +56,6 @@ class SACMethod(Method, target_setting=DiscreteTaskAgnosticRLSetting):  # type: 
         self.critic_kwargs: Dict = {}
         self.current_task_idx: int = -1
         self.logger: EpochLogger
-
 
     def configure(self, setting: DiscreteTaskAgnosticRLSetting) -> None:
         # IDEA: Copy over the info from the setting into the `TaskConfig` class which contains the
@@ -255,7 +255,7 @@ class SACMethod(Method, target_setting=DiscreteTaskAgnosticRLSetting):  # type: 
         reg_weights = None
         steps = train_env.max_steps
 
-        for t in range(steps):
+        for t in tqdm(range(steps), desc="Training"):
             # NOTE: Moving this 'on task change' to `on_task_switch`.
             # On task change
             # if self.current_task_idx != getattr(env, "cur_seq_idx", -1):
@@ -351,7 +351,10 @@ class SACMethod(Method, target_setting=DiscreteTaskAgnosticRLSetting):  # type: 
             ):
                 for j in range(self.algo_config.update_every):
                     batch = self.replay_buffer.sample_batch(self.algo_config.batch_size)
-                    if self.algo_config.cl_method in exp_replay_methods and self.current_task_idx > 0:
+                    if (
+                        self.algo_config.cl_method in exp_replay_methods
+                        and self.current_task_idx > 0
+                    ):
                         episodic_batch = self.episodic_memory.sample_batch(
                             self.algo_config.episodic_batch_size
                         )
@@ -401,7 +404,9 @@ class SACMethod(Method, target_setting=DiscreteTaskAgnosticRLSetting):  # type: 
 
                 # Each task gets equal share of 'kernel' weights.
                 if self.algo_config.packnet_fake_num_tasks is not None:
-                    num_tasks_left = self.algo_config.packnet_fake_num_tasks - self.current_task_idx - 1
+                    num_tasks_left = (
+                        self.algo_config.packnet_fake_num_tasks - self.current_task_idx - 1
+                    )
                 else:
                     num_tasks_left = env.num_envs - self.current_task_idx - 1
                 prune_perc = num_tasks_left / (num_tasks_left + 1)
@@ -658,8 +663,8 @@ class SACMethod(Method, target_setting=DiscreteTaskAgnosticRLSetting):  # type: 
     def test_agent(self, test_envs: List[gym.Env]):
         # TODO: parallelize test phase if we hit significant added walltime.
         for deterministic, num_eps in [
-            (False, self.algo_config.num_test_eps_stochastic),
-            (True, self.algo_config.num_test_eps_deterministic),
+            (False, self.task_config.num_test_eps_stochastic),
+            (True, self.task_config.num_test_eps_deterministic),
         ]:
             avg_success = []
             mode = "deterministic" if deterministic else "stochastic"
@@ -669,17 +674,43 @@ class SACMethod(Method, target_setting=DiscreteTaskAgnosticRLSetting):  # type: 
                 if self.algo_config.cl_method == "packnet":
                     self.packnet_helper.set_view(seq_idx)
 
-                for j in range(num_eps):
+                total_steps = 0
+                
+                # TODO: IDEA: Use some kind of context-manager to suppress gym.errors.ClosedEnvironmentError?
+                # Or use the context manager as a try:catch block so we just exit the block when the
+                # error happens?
+                # def suppress_env_closed_errors?
+                from contextlib import contextmanager
+                @contextmanager
+                def do_until_env_is_closed(env: gym.Env):
+                    try:
+                        yield
+                    except gym.error.ClosedEnvironmentError:
+                        pass
+
+                for episode in range(num_eps):
+                    # TODO: The number of test episodes is too large actually! Need to check instead
+                    # the `max_steps` property.
+                    if total_steps >= test_env.max_steps:
+                        break
+                    if test_env.is_closed():
+                        break
+                    total_steps += 1
                     o, d, ep_ret, ep_len = test_env.reset(), False, 0, 0
-                    while not (d or (ep_len == self.task_config.max_ep_len)):
+
+                    while not (d or (ep_len == self.task_config.max_ep_len)) and total_steps <= test_env.max_steps:
                         if self.algo_config.cl_method == "vcl":
                             # Disable multiple samples in VCL for faster evaluation
                             action_fn = self.get_action  # = vcl_get_stable_action
                         else:
                             action_fn = self.get_action
+                        if test_env.is_closed():
+                            break
+
                         o, r, d, _ = test_env.step(
                             action_fn(tf.convert_to_tensor(o), tf.constant(deterministic))
                         )
+                        total_steps += 1
                         ep_ret += r
                         ep_len += 1
                     self.logger.store(
@@ -704,7 +735,7 @@ class SACMethod(Method, target_setting=DiscreteTaskAgnosticRLSetting):  # type: 
             return
         if task_id is None:
             task_id = -1
-    
+
         self.current_task_idx = task_id
         self.current_task_t = 0
         if self.algo_config.cl_method in weights_reg_methods and self.current_task_idx > 0:
@@ -752,7 +783,12 @@ def main():
     from sequoia.common.config import Config
 
     config = Config(debug=True)
-    setting = IncrementalRLSetting(dataset="CW20")
+    setting = IncrementalRLSetting(
+        dataset="CW20",
+        train_steps_per_task=2_000,
+        train_max_steps=20 * 2_000,
+        test_steps_per_task=2_000,
+    )
     method = SACMethod()
     results = setting.apply(method, config=config)
     print(results.summary())

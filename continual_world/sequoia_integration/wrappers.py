@@ -14,6 +14,9 @@ from continual_world.utils.wrappers import SuccessCounter
 def wrap_sequoia_env(env: RLEnvironment, nb_tasks_in_env: int) -> gym.Env:
     env = SequoiaToCWWrapper(env, nb_tasks_in_env=nb_tasks_in_env)
     env = SuccessCounter(env)
+    # TODO: Missing a 'name' property, which would usually be the task name in metaworld.
+    # from metaworld.envs.mujoco.sawyer_xyz.sawyer_xyz_env import SawyerXYZEnv
+    env.name = "fake-name"
     return env
 
 def concat_x_and_t(observation: Observations, nb_tasks: int) -> np.ndarray:
