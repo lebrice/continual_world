@@ -1,3 +1,4 @@
+from typing import Optional
 import gym
 import numpy as np
 from gym import spaces
@@ -56,9 +57,10 @@ class SequoiaToCWWrapper(gym.Wrapper):
             self.reward_space = self.env.reward_space["y_pred"]
         # Attributes to match the ContinualLearningEnv from continual_world.
         self.num_envs = nb_tasks_in_env
+        self.cur_seq_idx: Optional[int] = None
         # self.steps_per_env = nb_tasks * self.env.max_steps
         # self.steps_limit = self.num_envs * self.steps_per_env
-
+    
     def action(self, action: Actions):
         if isinstance(action, Actions):
             return action.y_pred
@@ -72,6 +74,7 @@ class SequoiaToCWWrapper(gym.Wrapper):
     def observation(self, observation: RLSetting.Observations) -> np.ndarray:
         x = observation.x
         task_id = observation.task_labels
+        self.cur_seq_idx = task_id
         ts = np.zeros(self.onehot_len)
         ts[task_id] = 1
         return np.concatenate([x, ts], axis=-1)

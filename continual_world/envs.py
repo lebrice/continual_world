@@ -1,6 +1,6 @@
 from copy import deepcopy
-from typing import List, Sequence, Union
-
+from typing import List, Optional, Sequence, Union
+from functools import lru_cache
 import gym
 import metaworld
 import numpy as np
@@ -9,41 +9,64 @@ from gym.wrappers import TimeLimit
 
 from continual_world.utils.wrappers import (OneHotAdder, RandomizationWrapper, ScaleReward,
                             SuccessCounter)
+from pathlib import Path
 
 
+_MT50: Optional[metaworld.MT50] = None
+
+@lru_cache(1)
 def get_mt50():
-    saved_random_state = np.random.get_state()
-    np.random.seed(1)
-    MT50 = metaworld.MT50()
-    np.random.set_state(saved_random_state)
-    return MT50
+    global _MT50
+    if _MT50 is not None:
+        return _MT50
+    # NOTE: Not needed, metaworld already does this (not sure if this is new).
+    # saved_random_state = np.random.get_state()
+    # np.random.seed(1)
+    _MT50 = metaworld.MT50(seed=1)
+    # np.random.set_state(saved_random_state)
+    return _MT50
 
 
-MT50 = get_mt50()
+# No need to re-create the benchmark if the names are already available.
+MT50_TASK_NAMES_CACHE_PATH = Path("MT50_task_names.txt")
+
+def get_mt50_task_names() -> List[str]:
+    if MT50_TASK_NAMES_CACHE_PATH.exists():
+        mt50_task_names = MT50_TASK_NAMES_CACHE_PATH.read_text().splitlines()
+    else:
+        mt50_task_names = list(get_mt50().train_classes)
+        with MT50_TASK_NAMES_CACHE_PATH.open("w") as f:
+            f.writelines(mt50_task_names)
+    return mt50_task_names
+
+# MT50 = get_mt50()
 META_WORLD_TIME_HORIZON = 200
-MT50_TASK_NAMES = list(MT50.train_classes)
+# MT50_TASK_NAMES = list(MT50.train_classes)
 MW_OBS_LEN = 12
 MW_ACT_LEN = 4
 
 
 def get_task_name(name_or_number: Union[str, int]) -> str:
+    mt50_task_names = get_mt50_task_names() 
     if isinstance(name_or_number, int):
-        return MT50_TASK_NAMES[name_or_number]
-    if name_or_number not in MT50_TASK_NAMES:
+        return mt50_task_names[name_or_number]
+    if name_or_number not in mt50_task_names:
         # The version tag is probably wrong: return the env id with the right version.
-        name_to_actual_id = {env_id.split("-v")[0]: env_id for env_id in MT50_TASK_NAMES}
+        name_to_actual_id = {env_id.split("-v")[0]: env_id for env_id in mt50_task_names}
         name_without_version = name_or_number.split("-v")[0]
         return name_to_actual_id[name_without_version]
     return name_or_number
 
 
 def set_simple_goal(env, name):
-    goal = [task for task in MT50.train_tasks if task.env_name == name][0]
+    mt50 = get_mt50()
+    goal = [task for task in mt50.train_tasks if task.env_name == name][0]
     env.set_task(goal)
 
 
 def get_subtasks(name: str) -> List[str]:
-    return [s for s in MT50.train_tasks if s.env_name == name]
+    mt50 = get_mt50()
+    return [s for s in mt50.train_tasks if s.env_name == name]
 
 
 def get_mt50_idx(env):
@@ -54,7 +77,8 @@ def get_mt50_idx(env):
 
 def get_single_env(task: Union[int, str], one_hot_idx: int=0, one_hot_len: int=1, randomization: str="deterministic"):
     task_name = get_task_name(task)
-    env = MT50.train_classes[task_name]()
+    mt50 = get_mt50()
+    env = mt50.train_classes[task_name]()
     env = RandomizationWrapper(env, get_subtasks(task_name), randomization)
     env = OneHotAdder(env, one_hot_idx=one_hot_idx, one_hot_len=one_hot_len)
     # Currently TimeLimit is needed since SuccessCounter looks at dones.
@@ -99,7 +123,7 @@ class ContinualLearningEnv(gym.Env):
         if self.cur_step >= self.steps_limit:
             raise RuntimeError("Steps limit exceeded for ContinualLearningEnv!")
 
-    def pop_successes(self):
+    def pop_successes(self) -> List[bool]:
         all_successes = []
         self.avg_env_success = {}
         for env in self.envs:
