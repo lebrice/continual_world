@@ -8,7 +8,7 @@ class ReplayBuffer:
   A simple FIFO experience replay buffer for SAC agents.
   """
 
-  def __init__(self, obs_dim, act_dim, size):
+  def __init__(self, obs_dim: int, act_dim: int, size: int):
     self.obs1_buf = np.zeros([size, obs_dim], dtype=np.float32)
     self.obs2_buf = np.zeros([size, obs_dim], dtype=np.float32)
     self.acts_buf = np.zeros([size, act_dim], dtype=np.float32)

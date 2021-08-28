@@ -30,7 +30,7 @@ def concat_x_and_t(observation: Observations, nb_tasks: int) -> np.ndarray:
 
 
 class SequoiaToCWWrapper(gym.Wrapper):
-    def __init__(self, env: RLEnvironment, nb_tasks_in_env: int):
+    def __init__(self, env: RLEnvironment, nb_tasks_in_env: int, add_task_labels: bool = False):
         """Create a wrapper around a gym.Env from Sequoia so it matches the format from cw.
         
         Parameters

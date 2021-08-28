@@ -127,7 +127,9 @@ class MlpActor(Actor):
     def call(self, x: tf.Tensor) -> ActorOutput:
         obs = x
         if self.hide_task_id:
-            x = x[:, :MW_OBS_LEN]
+            # NOTE: Changing this, since it only applies to mujoco envs!
+            # x = x[:, :MW_OBS_LEN]
+            x = x[:, :self.input_dim]
         x = self.core(x)
         mu = self.head_mu(x)
         log_std = self.head_log_std(x)

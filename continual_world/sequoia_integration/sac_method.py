@@ -151,7 +151,8 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
         # NOTE: These attributes are set in self.configure. This is just here for type hints.
         self.task_config: TaskConfig
 
-        self.actor_cl: Type[Actor] = Actor
+        self.actor_cl: Type[Actor] = MlpActor
+        # TODO: Move this to the VCL subclass.
         if self.algo_config.cl_method == "vcl":
             self.actor_cl = VclMlpActor
 
@@ -196,6 +197,7 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
         )
         self.task_config.steps_per_task = setting.train_steps_per_task
         self.num_tasks = setting.nb_tasks
+        self.current_task_idx = -1
 
         self.logger = EpochLogger(
             self.task_config.logger_output,
@@ -203,7 +205,13 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
         )
 
         # TODO: Assuming that we have access to the task labels for now
-        self.obs_dim = obs_dim = np.prod(setting.observation_space.x.shape) + setting.nb_tasks
+        
+        self.obs_dim = np.prod(setting.observation_space.x.shape)
+        if setting.task_labels_at_train_time and setting.task_labels_at_test_time:
+            # The task ids will be concatenated to the observations.
+            # TODO: Actually check that the algos can work without the task ids.
+            self.obs_dim += setting.nb_tasks
+
         if isinstance(setting.action_space, spaces.Dict):
             action_space = setting.action_space["y_pred"]
         else:
@@ -212,7 +220,7 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
             raise NotImplementedError(
                 f"This Method expects a continuous action space (an instance of `gym.spaces.Box`)"
             )
-        self.act_dim = act_dim = np.prod(action_space.shape)
+        self.act_dim = np.prod(action_space.shape)
         # This implementation assumes all dimensions share the same bound!
         assert np.all(action_space.high == action_space.high[0])
 
@@ -220,7 +228,6 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
         tf.random.set_seed(self.task_config.seed)
         np.random.seed(self.task_config.seed)
 
-        self.current_task_idx = -1
 
         if self.algo_config.use_popart:
             assert self.algo_config.multihead_archs, "PopArt works only in the multi-head setup"
@@ -234,6 +241,23 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
         self.critic_kwargs = self.get_critic_kwargs(setting)
         
         self.create_networks()
+
+        # For reference on automatic alpha tuning, see
+        # "Automating Entropy Adjustment for Maximum Entropy" section
+        # in https://arxiv.org/abs/1812.05905
+        self.auto_alpha = False
+        if self.algo_config.alpha == "auto":
+            self.auto_alpha = True
+            self.all_log_alpha = tf.Variable(
+                np.ones((self.num_tasks, 1), dtype=np.float32), trainable=True
+            )
+            if self.algo_config.target_output_std is None:
+                self.target_entropy = -np.prod(setting.action_space.shape).astype(np.float32)
+            else:
+                target_1d_entropy = np.log(
+                    self.algo_config.target_output_std * math.sqrt(2 * math.pi * math.e)
+                )
+                self.target_entropy = self.act_dim * target_1d_entropy
 
         # TODO: Split these off into different methods based on the value of `cl_method`.
         cl_method = self.algo_config.cl_method
@@ -256,26 +280,9 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
         elif cl_method == "agem":
             episodic_mem_size = self.algo_config.episodic_mem_per_task * self.num_tasks
             self.episodic_memory = EpisodicMemory(
-                obs_dim=obs_dim, act_dim=act_dim, size=episodic_mem_size
+                obs_dim=self.obs_dim, act_dim=self.act_dim, size=episodic_mem_size
             )
             self.agem_helper = AgemHelper()
-
-        # For reference on automatic alpha tuning, see
-        # "Automating Entropy Adjustment for Maximum Entropy" section
-        # in https://arxiv.org/abs/1812.05905
-        self.auto_alpha = False
-        if self.algo_config.alpha == "auto":
-            self.auto_alpha = True
-            self.all_log_alpha = tf.Variable(
-                np.ones((self.num_tasks, 1), dtype=np.float32), trainable=True
-            )
-            if self.algo_config.target_output_std is None:
-                self.target_entropy = -np.prod(setting.action_space.shape).astype(np.float32)
-            else:
-                target_1d_entropy = np.log(
-                    self.algo_config.target_output_std * math.sqrt(2 * math.pi * math.e)
-                )
-                self.target_entropy = self.act_dim * target_1d_entropy
 
     def get_reg_helper(self) -> RegularizationHelper:
         cl_method = self.algo_config.cl_method
@@ -381,7 +388,7 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
         env.seed(self.task_config.seed)
         env.action_space.seed(self.task_config.seed)
         start_time = time.time()
-        o, ep_ret, ep_len = env.reset(), 0, 0
+        obs, ep_ret, ep_len = env.reset(), 0, 0
 
         # Main loop: collect experience in env and update/log each epoch
         learn_on_batch = self.get_learn_on_batch()
@@ -448,36 +455,36 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
             if current_task_t > self.algo_config.start_steps or (
                 self.algo_config.agent_policy_exploration and self.current_task_idx > 0
             ):
-                a = self.get_action(tf.convert_to_tensor(o))
+                action = self.get_action(tf.convert_to_tensor(obs))
             else:
-                a = env.action_space.sample()
+                action = env.action_space.sample()
 
             # Step the env
-            o2, r, d, info = env.step(a)
-            ep_ret += r
+            next_obs, reward, done, info = env.step(action)
+            ep_ret += reward
             ep_len += 1
 
             # Ignore the "done" signal if it comes from hitting the time
             # horizon (that is, when it's an artificial terminal signal
             # that isn't based on the agent's state)
-            d_to_store = d
+            done_to_store = done
             if ep_len == self.task_config.max_ep_len or info.get("TimeLimit.truncated"):
-                d_to_store = False
+                done_to_store = False
 
             # Store experience to replay buffer
-            self.replay_buffer.store(o, a, r, o2, d_to_store)
+            self.replay_buffer.store(obs, action, reward, next_obs, done_to_store)
 
             # Super critical, easy to overlook step: make sure to update
             # most recent observation!
-            o = o2
+            obs = next_obs
 
             # End of trajectory handling
-            if d or (ep_len == self.task_config.max_ep_len):
+            if done or (ep_len == self.task_config.max_ep_len):
                 self.logger.store({"train/return": ep_ret, "train/ep_length": ep_len})
                 ep_ret, ep_len = 0, 0
                 if t < steps - 1:
                     try:
-                        o = env.reset()
+                        obs = env.reset()
                     except gym.error.ClosedEnvironmentError:
                         breakpoint()
                         break
@@ -489,6 +496,7 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
             ):
                 for j in range(self.algo_config.update_every):
                     batch = self.replay_buffer.sample_batch(self.algo_config.batch_size)
+                    episodic_batch = None
                     if (
                         self.algo_config.cl_method in exp_replay_methods
                         and self.current_task_idx > 0
@@ -496,8 +504,7 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
                         episodic_batch = self.episodic_memory.sample_batch(
                             self.algo_config.episodic_batch_size
                         )
-                    else:
-                        episodic_batch = None
+
                     results = learn_on_batch(
                         tf.convert_to_tensor(self.current_task_idx), batch, episodic_batch
                     )
