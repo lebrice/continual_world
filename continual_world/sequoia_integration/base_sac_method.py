@@ -1,43 +1,24 @@
-from collections import defaultdict
-import contextlib
 import itertools
 import logging
 import math
 import os
 import random
 import time
+from argparse import Namespace
+from collections import defaultdict
 from dataclasses import asdict, dataclass
-from typing import Any, ClassVar, Dict, List, Optional, Tuple, Type, Union
-from simple_parsing import ArgumentParser
+from typing import Any, ClassVar, Dict, List, NamedTuple, Optional, Tuple, Type, Union
 
 import gym
 import numpy as np
-from sequoia.settings.rl.incremental.setting import IncrementalRLSetting
-from sequoia.settings.rl.setting import RLSetting
 import tensorflow as tf
-from gym import spaces
-from sequoia.common.spaces.typed_dict import TypedDictSpace
-from sequoia.methods import Method
-from sequoia.settings.rl import DiscreteTaskAgnosticRLSetting
-from simple_parsing.helpers import choice, field, list_field
-from simple_parsing.helpers.hparams.hyperparameters import HyperParameters
-from simple_parsing.helpers.serialization.serializable import Serializable
-from tensorflow.python.types.core import Value
-from tqdm import tqdm
-
-from continual_world.config import AlgoConfig, TaskConfig
-from continual_world.methods.agem import AgemHelper
-from continual_world.methods.packnet import PackNetHelper
-from continual_world.methods.regularization import (
-    EWCHelper,
-    L2Helper,
-    MASHelper,
-    RegularizationHelper,
-)
+from continual_world.config import TaskConfig
 from continual_world.methods.vcl import VclHelper, VclMlpActor
-from continual_world.sequoia_integration.tf_to_torch import tf_to_torch
-from continual_world.sequoia_integration.wrappers import concat_x_and_t, wrap_sequoia_env
-from continual_world.spinup import models
+from continual_world.sequoia_integration.wrappers import (
+    SequoiaToCWWrapper,
+    concat_x_and_t,
+    wrap_sequoia_env,
+)
 from continual_world.spinup.models import Actor, MlpActor, MlpCritic, PopArtMlpCritic
 from continual_world.spinup.replay_buffers import (
     EpisodicMemory,
@@ -53,6 +34,19 @@ from continual_world.utils.utils import (
     sci2int,
     str2bool,
 )
+from gym import spaces
+from sequoia.common.spaces.typed_dict import TypedDictSpace
+from sequoia.methods import Method
+from sequoia.settings.base.setting import SettingType
+from sequoia.settings.rl import DiscreteTaskAgnosticRLSetting
+from sequoia.settings.rl.incremental.setting import IncrementalRLSetting
+from sequoia.settings.rl.setting import RLSetting
+from simple_parsing import ArgumentParser
+from simple_parsing.helpers import choice, field, list_field
+from simple_parsing.helpers.hparams.hyperparameters import HyperParameters
+from simple_parsing.helpers.serialization.serializable import Serializable
+from tensorflow.python.types.core import Value
+from tqdm import tqdm
 
 try:
     from typing import Literal
@@ -60,9 +54,29 @@ except ImportError:
     from typing_extensions import Literal  # type: ignore
 
 
-weights_reg_methods = ["l2", "ewc", "mas"]
-exp_replay_methods = ["agem"]
+# weights_reg_methods = ["l2", "ewc", "mas"]
+# exp_replay_methods = ["agem"]
 logger = logging.getLogger(__name__)
+
+
+try:
+    from typing import TypedDict
+except ImportError:
+    from typing_extensions import TypedDict
+
+
+class BatchDict(TypedDict):
+    obs1: tf.Tensor
+    obs2: tf.Tensor
+    acts: tf.Tensor
+    rews: tf.Tensor
+    done: bool
+
+
+class GradientsTuple(NamedTuple):
+    actor_gradients: List[tf.Tensor]
+    critic_gradients: List[tf.Tensor]
+    alpha_gradient: List[tf.Tensor]
 
 
 # TODO: switch this to the `DiscreteTaskAgnosticRLSetting` if/when we add support for passing the
@@ -76,7 +90,16 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
     class Config(HyperParameters):
         """ Configuration options for the Algorithm. """
 
+        # Which CL method to use.
+        # NOTE: This has been converted into what is essentially an 'Abstract' property that is
+        # fixed by the different subclasses.
+        # cl_method: Optional[str] = choice(  # type: ignore
+        #     None, "l2", "ewc", "mas", "vcl", "packnet", "agem", default=None
+        # )
+
+        # Wether to clear the replay buffer when a task boundary is reached during training.
         reset_buffer_on_task_change: bool = True
+        # Wether to reset the optimzier when a task boundary is reached during training.
         reset_optimizer_on_task_change: bool = True
         reset_critic_on_task_change: bool = False
         activation: str = "lrelu"
@@ -86,10 +109,6 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
         lr: float = 1e-3
         alpha: str = "auto"
         use_popart: bool = False
-        cl_method: Optional[str] = choice(  # type: ignore
-            None, "l2", "ewc", "mas", "vcl", "packnet", "agem", default=None
-        )
-        packnet_retrain_steps: int = 0
         regularize_critic: bool = False
         cl_reg_coef: float = 0.0
         vcl_first_task_kl: bool = True
@@ -152,10 +171,6 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
         self.task_config: TaskConfig
 
         self.actor_cl: Type[Actor] = MlpActor
-        # TODO: Move this to the VCL subclass.
-        if self.algo_config.cl_method == "vcl":
-            self.actor_cl = VclMlpActor
-
         self.critic_cl: Type[MlpCritic] = MlpCritic
 
         self.critic_variables: List[tf.Variable]
@@ -169,10 +184,11 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
         self.target_critic2: Union[MlpCritic, PopArtMlpCritic]
 
         self.optimizer: tf.keras.optimizers.Optimizer
-        
+
         # The arguments to be pased to `self.actor_cl` (the actor class constructor).
         self.actor_kwargs: Dict = {}
         self.critic_kwargs: Dict = {}
+        self.previous_task_idx: int = -1
         self.current_task_idx: int = -1
         self.logger: EpochLogger
         self.replay_buffer: Union[ReplayBuffer, ReservoirReplayBuffer]
@@ -181,10 +197,20 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
         self.all_log_alpha: tf.Variable
         self.auto_alpha: bool = False
 
+        self.add_task_ids: bool = False
+
+        # The number of tasks that the train and validation environments actually contain.
+        self.nb_tasks_in_train_env: int = 1
+        self.nb_tasks_in_valid_env: int = 1
+
+        # Wether the tasks follow some non-stationary distribution, or if they are uniformly sampled
+        self.stationary_context: bool = False
+
     def configure(self, setting: DiscreteTaskAgnosticRLSetting) -> None:
         """ Configure the Method before training begins on the envs of the Setting. """
         # IDEA: Copy over the info from the setting into the `TaskConfig` class which contains the
         # values that would have been used by the `sac` function.
+        # TODO: Use the values of `run_mt` when `setting.stationary_context` is True.
         # NOTE: Using the arguments from `cl_example.sh` for now.
         # --seed 0 \
         # --steps_per_task 2e3 \
@@ -192,20 +218,27 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
         # --cl_method ewc \
         # --cl_reg_coef 1e4 \
         # --logger_output tsv tensorboard
+
         self.task_config = TaskConfig(
-            seed=0, tasks="DOUBLE_PMO1", logger_output=["tsv", "tensorboard"]
+            seed=0,
+            tasks="DOUBLE_PMO1",
+            logger_output=["tsv", "tensorboard"],
+            steps_per_task=setting.train_steps_per_task,
         )
-        self.task_config.steps_per_task = setting.train_steps_per_task
+
         self.num_tasks = setting.nb_tasks
+        self.stationary_context = setting.stationary_context
+        self.nb_tasks_in_train_env = setting.nb_tasks if setting.stationary_context else 1
+        self.nb_tasks_in_valid_env = setting.nb_tasks if setting.stationary_context else 1
+
         self.current_task_idx = -1
 
         self.logger = EpochLogger(
             self.task_config.logger_output,
             config=dict(**asdict(self.task_config), **asdict(self.algo_config)),
         )
-
-        # TODO: Assuming that we have access to the task labels for now
-        
+        # Wether or not we add the task IDS to the observations.
+        self.add_task_ids = setting.task_labels_at_train_time and setting.task_labels_at_test_time
         self.obs_dim = np.prod(setting.observation_space.x.shape)
         if setting.task_labels_at_train_time and setting.task_labels_at_test_time:
             # The task ids will be concatenated to the observations.
@@ -228,7 +261,6 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
         tf.random.set_seed(self.task_config.seed)
         np.random.seed(self.task_config.seed)
 
-
         if self.algo_config.use_popart:
             assert self.algo_config.multihead_archs, "PopArt works only in the multi-head setup"
             self.critic_cl = PopArtMlpCritic
@@ -239,7 +271,7 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
 
         self.actor_kwargs = self.get_actor_kwargs(setting)
         self.critic_kwargs = self.get_critic_kwargs(setting)
-        
+
         self.create_networks()
 
         # For reference on automatic alpha tuning, see
@@ -260,49 +292,261 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
                 self.target_entropy = self.act_dim * target_1d_entropy
 
         # TODO: Split these off into different methods based on the value of `cl_method`.
-        cl_method = self.algo_config.cl_method
-        # Setup CL methods
-        if cl_method == "packnet":
-            packnet_models = [self.actor]
-            if self.algo_config.regularize_critic:
-                packnet_models.extend([self.critic1, self.critic2])
-            self.packnet_helper = PackNetHelper(packnet_models)
-        elif cl_method in weights_reg_methods:
-            self.old_params = list(
-                tf.Variable(tf.identity(param), trainable=False)
-                for param in self.all_common_variables
-            )
-            self.reg_helper = self.get_reg_helper()
-        elif cl_method == "vcl":
-            self.vcl_helper = VclHelper(
-                self.actor, self.critic1, self.critic2, self.algo_config.regularize_critic
-            )
-        elif cl_method == "agem":
-            episodic_mem_size = self.algo_config.episodic_mem_per_task * self.num_tasks
-            self.episodic_memory = EpisodicMemory(
-                obs_dim=self.obs_dim, act_dim=self.act_dim, size=episodic_mem_size
-            )
-            self.agem_helper = AgemHelper()
+        # cl_method = self.algo_config.cl_method
+        # Setup CL methods: Moved to the subclasses.
+        # if cl_method == "packnet":
+        #     packnet_models = [self.actor]
+        #     if self.algo_config.regularize_critic:
+        #         packnet_models.extend([self.critic1, self.critic2])
+        #     self.packnet_helper = PackNetHelper(packnet_models)
+        # elif cl_method in weights_reg_methods:
+        #     self.old_params = list(
+        #         tf.Variable(tf.identity(param), trainable=False)
+        #         for param in self.all_common_variables
+        #     )
+        #     self.reg_helper = self.get_reg_helper()
+        # if cl_method == "vcl":
+        #     self.vcl_helper = VclHelper(
+        #         self.actor, self.critic1, self.critic2, self.algo_config.regularize_critic
+        #     )
+        # if cl_method == "agem":
+        #     episodic_mem_size = self.algo_config.episodic_mem_per_task * self.num_tasks
+        #     self.episodic_memory = EpisodicMemory(
+        #         obs_dim=self.obs_dim, act_dim=self.act_dim, size=episodic_mem_size
+        #     )
+        #     self.agem_helper = AgemHelper()
 
-    def get_reg_helper(self) -> RegularizationHelper:
-        cl_method = self.algo_config.cl_method
-        if cl_method == "l2":
-            return L2Helper(
-                self.actor, self.critic1, self.critic2, self.algo_config.regularize_critic
+    def fit(self, train_env: gym.Env, valid_env: gym.Env,) -> None:
+        """Train and validate using the environments created by the Setting.
+
+        Parameters
+        ----------
+        train_env : gym.Env
+            Training environment.
+        valid_env : gym.Env
+            Validation environment.
+        """
+        steps = train_env.max_steps
+        env: SequoiaToCWWrapper = wrap_sequoia_env(
+            train_env,
+            nb_tasks_in_env=self.nb_tasks_in_train_env,
+            add_task_ids=self.add_task_ids,
+            is_multitask=self.stationary_context,
+        )
+        test_envs: List[SequoiaToCWWrapper] = [
+            wrap_sequoia_env(
+                valid_env,
+                nb_tasks_in_env=self.nb_tasks_in_valid_env,
+                add_task_ids=self.add_task_ids,
+                is_multitask=self.stationary_context,
             )
-        elif cl_method == "ewc":
-            return EWCHelper(
-                self.actor,
-                self.critic1,
-                self.critic2,
-                self.algo_config.regularize_critic,
-                self.algo_config.critic_reg_coef,
-            )
-        elif cl_method == "mas":
-            return MASHelper(
-                self.actor, self.critic1, self.critic2, self.algo_config.regularize_critic
-            )
-        raise NotImplementedError(cl_method)
+        ]
+
+        env.seed(self.task_config.seed)
+        env.action_space.seed(self.task_config.seed)
+        start_time = time.time()
+        obs, ep_ret, ep_len = env.reset(), 0, 0
+
+        # Main loop: collect experience in env and update/log each epoch
+        learn_on_batch = self.get_learn_on_batch()
+        current_task_t = 0
+        reg_weights = None
+
+        for t in tqdm(range(steps), desc="Training"):
+            # NOTE: Moving this 'on task change' to `on_task_switch`.
+            # TODO: This might actually make some sense, if we consider multi-task and traditional
+            # envs, which will change tasks always. However, the task distribution is nonstationary
+            # at train time, so we'd be better off just considering all tasks as being the same, no?
+
+            # NOTE: Not doing this for now, because we don't want to call `on_task_switch` when in a
+            # stationary context, and we also expect to have `on_task_switch` be called by the
+            # Setting anyways if the task ids are available.
+            # task_id = getattr(env, "cur_seq_idx", -1)
+            # if self.current_task_idx != task_id:
+            #     self.on_task_switch(task_id)
+
+            # Until start_steps have elapsed, randomly sample actions
+            # from a uniform distribution for better exploration. Afterwards,
+            # use the learned policy.
+            if current_task_t > self.algo_config.start_steps or (
+                self.algo_config.agent_policy_exploration and self.current_task_idx > 0
+            ):
+                action = self.get_action(tf.convert_to_tensor(obs))
+            else:
+                action = env.action_space.sample()
+
+            # Step the env
+            next_obs, reward, done, info = env.step(action)
+            ep_ret += reward
+            ep_len += 1
+
+            # Ignore the "done" signal if it comes from hitting the time
+            # horizon (that is, when it's an artificial terminal signal
+            # that isn't based on the agent's state)
+            done_to_store = done
+            if ep_len == self.task_config.max_ep_len or info.get("TimeLimit.truncated"):
+                done_to_store = False
+
+            # Store experience to replay buffer
+            self.replay_buffer.store(obs, action, reward, next_obs, done_to_store)
+
+            # Super critical, easy to overlook step: make sure to update
+            # most recent observation!
+            obs = next_obs
+
+            # End of trajectory handling
+            if done or (ep_len == self.task_config.max_ep_len):
+                self.logger.store({"train/return": ep_ret, "train/ep_length": ep_len})
+                ep_ret, ep_len = 0, 0
+                if t < steps - 1:
+                    obs = env.reset()
+
+            # Update handling
+            if (
+                current_task_t >= self.algo_config.update_after
+                and current_task_t % self.algo_config.update_every == 0
+            ):
+                # NOTE: @lebrice: Interesting: Perform one update per step, even when `update_every`
+                # is an interval, i.e. "perform 50 updates every 50 steps".
+
+                for j in range(self.algo_config.update_every):
+
+                    def sample_batches(self) -> Tuple[BatchDict, Optional[BatchDict]]:
+                        batch = self.replay_buffer.sample_batch(self.algo_config.batch_size)
+                        episodic_batch = None
+                        return batch, episodic_batch
+
+                    batch = self.replay_buffer.sample_batch(self.algo_config.batch_size)
+                    assert False, batch
+                    episodic_batch = None
+                    # AGEM:
+                    if (
+                        self.algo_config.cl_method == "agem"
+                        # NOTE: Above check is equivalent to previous:
+                        # self.algo_config.cl_method in exp_replay_methods
+                        and self.current_task_idx > 0
+                    ):
+                        episodic_batch = self.episodic_memory.sample_batch(
+                            self.algo_config.episodic_batch_size
+                        )
+
+                    results = self.learn_on_batch(
+                        tf.convert_to_tensor(self.current_task_idx), batch, episodic_batch
+                    )
+                    self.logger.store(
+                        {
+                            "train/q1_vals": results["q1"],
+                            "train/q2_vals": results["q2"],
+                            "train/log_pi": results["logp_pi"],
+                            "train/loss_pi": results["pi_loss"],
+                            "train/loss_q1": results["q1_loss"],
+                            "train/loss_q2": results["q2_loss"],
+                            "train/loss_reg": results["reg_loss"],
+                            "train/agem_violation": results["agem_violation"],
+                        }
+                    )
+
+                    for i in range(self.num_tasks):
+                        if self.auto_alpha:
+                            self.logger.store(
+                                {f"train/alpha/{i}": float(tf.math.exp(self.all_log_alpha[i][0]))}
+                            )
+                        # if self.critic_cl is PopArtMlpCritic: # (NOTE: using isinstance instead)
+                        if isinstance(self.critic1, PopArtMlpCritic):
+                            self.logger.store(
+                                {
+                                    f"train/popart_mean/{i}": self.critic1.moment1[i][0],
+                                    f"train/popart_std/{i}": self.critic1.sigma[i][0],
+                                }
+                            )
+
+            # TODO: This used to check for properties on the env. Make sure that it also works like
+            # this:
+            # steps_per_task = env.steps_per_env
+            # NOTE: (@lebrice) This is basically a check for a task boundary, right?
+            # TODO: Move this to `on_task_switch`?
+            # if (
+            #     self.algo_config.cl_method == "packnet"
+            #     and (current_task_t + 1 == steps_per_task)
+            #     and self.current_task_idx < self.num_tasks - 1
+            # ):
+            #     if self.current_task_idx == 0:
+            #         self.packnet_helper.set_freeze_biases_and_normalization(True)
+
+            #     # Each task gets equal share of 'kernel' weights.
+            #     if self.algo_config.packnet_fake_num_tasks is not None:
+            #         num_tasks_left = (
+            #             self.algo_config.packnet_fake_num_tasks - self.current_task_idx - 1
+            #         )
+            #     else:
+            #         num_tasks_left = env.num_envs - self.current_task_idx - 1
+            #     prune_perc = num_tasks_left / (num_tasks_left + 1)
+            #     self.packnet_helper.prune(prune_perc, self.current_task_idx)
+
+            #     reset_optimizer(self.optimizer)
+
+            #     for _ in range(self.algo_config.packnet_retrain_steps):
+            #         batch = self.replay_buffer.sample_batch(self.algo_config.batch_size)
+            #         self.learn_on_batch(tf.convert_to_tensor(self.current_task_idx), batch)
+
+            #     reset_optimizer(self.optimizer)
+
+            # End of epoch wrap-up
+            if ((t + 1) % self.task_config.log_every == 0) or (t + 1 == steps):
+                epoch = (t + 1 + self.task_config.log_every - 1) // self.task_config.log_every
+
+                # Save model
+                if (epoch % self.algo_config.save_freq_epochs == 0) or (t + 1 == steps):
+                    dir_prefixes = []
+                    if self.current_task_idx == -1:
+                        dir_prefixes.append("./checkpoints")
+                    else:
+                        dir_prefixes.append("./checkpoints/task{}".format(self.current_task_idx))
+                        if self.current_task_idx == self.num_tasks - 1:
+                            dir_prefixes.append("./checkpoints")
+
+                    for prefix in dir_prefixes:
+                        self.actor.save_weights(os.path.join(prefix, "actor"))
+                        self.critic1.save_weights(os.path.join(prefix, "critic1"))
+                        self.target_critic1.save_weights(os.path.join(prefix, "target_critic1"))
+                        self.critic2.save_weights(os.path.join(prefix, "critic2"))
+                        self.target_critic2.save_weights(os.path.join(prefix, "target_critic2"))
+
+                # Test the performance of the deterministic version of the agent.
+                self.test_agent(test_envs)
+
+                # Log info about epoch
+                self.logger.log_tabular("epoch", epoch)
+                self.logger.log_tabular("train/return", with_min_and_max=True)
+                self.logger.log_tabular("train/ep_length", average_only=True)
+                self.logger.log_tabular("total_env_steps", t + 1)
+                self.logger.log_tabular("current_task_steps", current_task_t + 1)
+                self.logger.log_tabular("train/q1_vals", with_min_and_max=True)
+                self.logger.log_tabular("train/q2_vals", with_min_and_max=True)
+                self.logger.log_tabular("train/log_pi", with_min_and_max=True)
+                self.logger.log_tabular("train/loss_pi", average_only=True)
+                self.logger.log_tabular("train/loss_q1", average_only=True)
+                self.logger.log_tabular("train/loss_q2", average_only=True)
+                for i in range(self.num_tasks):
+                    if self.auto_alpha:
+                        self.logger.log_tabular("train/alpha/{}".format(i), average_only=True)
+                    # if self.critic_cl is PopArtMlpCritic:
+                    if isinstance(self.critic1, PopArtMlpCritic):
+                        self.logger.log_tabular("train/popart_mean/{}".format(i), average_only=True)
+                        self.logger.log_tabular("train/popart_std/{}".format(i), average_only=True)
+                self.logger.log_tabular("train/loss_reg", average_only=True)
+                self.logger.log_tabular("train/agem_violation", average_only=True)
+
+                # TODO: We assume here that SuccessCounter is outermost wrapper.
+                avg_success = np.mean(env.pop_successes())
+                self.logger.log_tabular("train/success", avg_success)
+                if "seq_idx" in info:
+                    self.logger.log_tabular("train/active_env", info["seq_idx"])
+
+                self.logger.log_tabular("walltime", time.time() - start_time)
+                self.logger.dump_tabular()
+
+            current_task_t += 1
 
     def create_replay_buffer(self) -> ReplayBuffer:
         # Create experience buffer
@@ -348,6 +592,7 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
 
     def create_networks(self) -> None:
         # Create actor and critic networks
+
         self.actor = self.actor_cl(**self.actor_kwargs)
 
         self.critic1 = self.critic_cl(**self.critic_kwargs)
@@ -367,9 +612,19 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
         )
         self.optimizer = tf.keras.optimizers.Adam(learning_rate=self.algo_config.lr)
 
+        # FIXME: Remove this, debugging.
+        self._last_task_ids = None
+
     def get_actions(
         self, observations: DiscreteTaskAgnosticRLSetting.Observations, action_space: gym.Space
     ) -> Union[DiscreteTaskAgnosticRLSetting.Actions, Any]:
+        # BUG: In TraditionalRLSetting, we get some weird task ids during test time, makes no sense.
+        if observations.task_labels != self._last_task_ids:
+            print(f"New task ids: {observations.task_labels} (obs = {observations})")
+        if observations.done:
+            print(f"Obs has done=True: {observations}")
+        self._last_task_ids = observations.task_labels
+
         obs = concat_x_and_t(observations, nb_tasks=self.num_tasks)
         action: tf.Tensor = self.get_action(tf.convert_to_tensor(obs))
         action_np = action.numpy()
@@ -377,270 +632,29 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
             return action_space.dtype(**action_np)
         return action_np
 
-    def fit(self, train_env: gym.Env, valid_env: gym.Env,) -> None:
-        # TODO: Number of tasks per env is usually encoded as `num_envs` on the env, but we might
-        # have an env that only goes through one task. Would be good to actually disentangle this
-        # somehow.
-        nb_tasks_in_env = 1
-        env = wrap_sequoia_env(train_env, nb_tasks_in_env=nb_tasks_in_env)
-        test_envs = [wrap_sequoia_env(valid_env, nb_tasks_in_env=nb_tasks_in_env)]
-
-        env.seed(self.task_config.seed)
-        env.action_space.seed(self.task_config.seed)
-        start_time = time.time()
-        obs, ep_ret, ep_len = env.reset(), 0, 0
-
-        # Main loop: collect experience in env and update/log each epoch
-        learn_on_batch = self.get_learn_on_batch()
-        current_task_t = 0
-        reg_weights = None
-        steps = train_env.max_steps
-
-        for t in tqdm(range(steps), desc="Training"):
-            # NOTE: Moving this 'on task change' to `on_task_switch`.
-            # TODO: This might actually make some sense, if we consider multi-task and traditional
-            # envs, which will change tasks always. However, the task distribution is nonstationary
-            # at train time, so we'd be better off just considering all tasks as being the same, no?
-
-            # On task change
-            # if self.current_task_idx != getattr(env, "cur_seq_idx", -1):
-            #     self.current_task_idx = getattr(env, "cur_seq_idx")
-            #     current_task_t = 0
-            #     if self.algo_config.cl_method in weights_reg_methods and self.current_task_idx > 0:
-            #         for old_param, new_param in zip(self.old_params, self.all_common_variables):
-            #             old_param.assign(new_param)
-            #         self.reg_helper.update_reg_weights(self.replay_buffer)
-
-            #     elif self.algo_config.cl_method in exp_replay_methods and self.current_task_idx > 0:
-            #         new_episodic_mem = self.replay_buffer.sample_batch(
-            #             self.algo_config.episodic_mem_per_task
-            #         )
-            #         self.episodic_memory.store_multiple(**new_episodic_mem)
-            #     elif self.algo_config.cl_method == "vcl" and self.current_task_idx > 0:
-            #         self.vcl_helper.update_prior()
-
-            #     if self.algo_config.reset_buffer_on_task_change:
-            #         assert self.task_config.buffer_type == "fifo"
-            #         self.replay_buffer = ReplayBuffer(
-            #             obs_dim=self.obs_dim,
-            #             act_dim=self.act_dim,
-            #             size=self.algo_config.replay_size,
-            #         )
-            #     if self.algo_config.reset_critic_on_task_change:
-            #         reset_weights(self.critic1, self.critic_cl, self.critic_kwargs)
-            #         self.target_critic1.set_weights(self.critic1.get_weights())
-            #         reset_weights(self.critic2, self.critic_cl, self.critic_kwargs)
-            #         self.target_critic2.set_weights(self.critic2.get_weights())
-
-            #     if self.algo_config.reset_optimizer_on_task_change:
-            #         reset_optimizer(self.optimizer)
-
-            #     # Update variables list and update function in case model changed.
-            #     # E.g: For VCL after the first task we set trainable=False for layer
-            #     # normalization. We need to recompute the graph in order for TensorFlow
-            #     # to notice this change.
-            #     self.learn_on_batch = self.algo_config.get_learn_on_batch()
-            #     self.all_variables = (
-            #         self.algo_config.actor.trainable_variables + self.algo_config.critic_variables
-            #     )
-            #     self.all_common_variables = (
-            #         self.algo_config.actor.common_variables
-            #         + self.algo_config.critic1.common_variables
-            #         + self.algo_config.critic2.common_variables
-            #     )
-
-            # Until start_steps have elapsed, randomly sample actions
-            # from a uniform distribution for better exploration. Afterwards,
-            # use the learned policy.
-            if current_task_t > self.algo_config.start_steps or (
-                self.algo_config.agent_policy_exploration and self.current_task_idx > 0
-            ):
-                action = self.get_action(tf.convert_to_tensor(obs))
-            else:
-                action = env.action_space.sample()
-
-            # Step the env
-            next_obs, reward, done, info = env.step(action)
-            ep_ret += reward
-            ep_len += 1
-
-            # Ignore the "done" signal if it comes from hitting the time
-            # horizon (that is, when it's an artificial terminal signal
-            # that isn't based on the agent's state)
-            done_to_store = done
-            if ep_len == self.task_config.max_ep_len or info.get("TimeLimit.truncated"):
-                done_to_store = False
-
-            # Store experience to replay buffer
-            self.replay_buffer.store(obs, action, reward, next_obs, done_to_store)
-
-            # Super critical, easy to overlook step: make sure to update
-            # most recent observation!
-            obs = next_obs
-
-            # End of trajectory handling
-            if done or (ep_len == self.task_config.max_ep_len):
-                self.logger.store({"train/return": ep_ret, "train/ep_length": ep_len})
-                ep_ret, ep_len = 0, 0
-                if t < steps - 1:
-                    try:
-                        obs = env.reset()
-                    except gym.error.ClosedEnvironmentError:
-                        breakpoint()
-                        break
-
-            # Update handling
-            if (
-                current_task_t >= self.algo_config.update_after
-                and current_task_t % self.algo_config.update_every == 0
-            ):
-                for j in range(self.algo_config.update_every):
-                    batch = self.replay_buffer.sample_batch(self.algo_config.batch_size)
-                    episodic_batch = None
-                    if (
-                        self.algo_config.cl_method in exp_replay_methods
-                        and self.current_task_idx > 0
-                    ):
-                        episodic_batch = self.episodic_memory.sample_batch(
-                            self.algo_config.episodic_batch_size
-                        )
-
-                    results = learn_on_batch(
-                        tf.convert_to_tensor(self.current_task_idx), batch, episodic_batch
-                    )
-                    self.logger.store(
-                        {
-                            "train/q1_vals": results["q1"],
-                            "train/q2_vals": results["q2"],
-                            "train/log_pi": results["logp_pi"],
-                            "train/loss_pi": results["pi_loss"],
-                            "train/loss_q1": results["q1_loss"],
-                            "train/loss_q2": results["q2_loss"],
-                            "train/loss_reg": results["reg_loss"],
-                            "train/agem_violation": results["agem_violation"],
-                        }
-                    )
-
-                    for i in range(self.num_tasks):
-                        if self.auto_alpha:
-                            self.logger.store(
-                                {
-                                    "train/alpha/{}".format(i): float(
-                                        tf.math.exp(self.all_log_alpha[i][0])
-                                    )
-                                }
-                            )
-                        # if self.critic_cl is PopArtMlpCritic: # (NOTE: @lebrice: using isinstance instead:)
-                        if isinstance(self.critic1, PopArtMlpCritic):
-                            self.logger.store(
-                                {
-                                    "train/popart_mean/{}".format(i): self.critic1.moment1[i][0],
-                                    "train/popart_std/{}".format(i): self.critic1.sigma[i][0],
-                                }
-                            )
-
-            if (
-                self.algo_config.cl_method == "packnet"
-                and (current_task_t + 1 == env.steps_per_env)
-                and self.current_task_idx < env.num_envs - 1
-            ):
-                if self.current_task_idx == 0:
-                    self.packnet_helper.set_freeze_biases_and_normalization(True)
-
-                # Each task gets equal share of 'kernel' weights.
-                if self.algo_config.packnet_fake_num_tasks is not None:
-                    num_tasks_left = (
-                        self.algo_config.packnet_fake_num_tasks - self.current_task_idx - 1
-                    )
-                else:
-                    num_tasks_left = env.num_envs - self.current_task_idx - 1
-                prune_perc = num_tasks_left / (num_tasks_left + 1)
-                self.packnet_helper.prune(prune_perc, self.current_task_idx)
-
-                reset_optimizer(self.optimizer)
-
-                for _ in range(self.algo_config.packnet_retrain_steps):
-                    batch = self.replay_buffer.sample_batch(self.algo_config.batch_size)
-                    learn_on_batch(tf.convert_to_tensor(self.current_task_idx), batch)
-
-                reset_optimizer(self.optimizer)
-
-            # End of epoch wrap-up
-            if ((t + 1) % self.task_config.log_every == 0) or (t + 1 == steps):
-                epoch = (t + 1 + self.task_config.log_every - 1) // self.task_config.log_every
-
-                # Save model
-                if (epoch % self.algo_config.save_freq_epochs == 0) or (t + 1 == steps):
-                    dir_prefixes = []
-                    if self.current_task_idx == -1:
-                        dir_prefixes.append("./checkpoints")
-                    else:
-                        dir_prefixes.append("./checkpoints/task{}".format(self.current_task_idx))
-                        if self.current_task_idx == self.num_tasks - 1:
-                            dir_prefixes.append("./checkpoints")
-
-                    for prefix in dir_prefixes:
-                        self.actor.save_weights(os.path.join(prefix, "actor"))
-                        self.critic1.save_weights(os.path.join(prefix, "critic1"))
-                        self.target_critic1.save_weights(os.path.join(prefix, "target_critic1"))
-                        self.critic2.save_weights(os.path.join(prefix, "critic2"))
-                        self.target_critic2.save_weights(os.path.join(prefix, "target_critic2"))
-
-                # Test the performance of the deterministic version of the agent.
-                self.test_agent(test_envs)
-
-                # Log info about epoch
-                self.logger.log_tabular("epoch", epoch)
-                self.logger.log_tabular("train/return", with_min_and_max=True)
-                self.logger.log_tabular("train/ep_length", average_only=True)
-                self.logger.log_tabular("total_env_steps", t + 1)
-                self.logger.log_tabular("current_task_steps", current_task_t + 1)
-                self.logger.log_tabular("train/q1_vals", with_min_and_max=True)
-                self.logger.log_tabular("train/q2_vals", with_min_and_max=True)
-                self.logger.log_tabular("train/log_pi", with_min_and_max=True)
-                self.logger.log_tabular("train/loss_pi", average_only=True)
-                self.logger.log_tabular("train/loss_q1", average_only=True)
-                self.logger.log_tabular("train/loss_q2", average_only=True)
-                for i in range(self.num_tasks):
-                    if self.auto_alpha:
-                        self.logger.log_tabular("train/alpha/{}".format(i), average_only=True)
-                    if self.critic_cl is PopArtMlpCritic:
-                        self.logger.log_tabular("train/popart_mean/{}".format(i), average_only=True)
-                        self.logger.log_tabular("train/popart_std/{}".format(i), average_only=True)
-                self.logger.log_tabular("train/loss_reg", average_only=True)
-                self.logger.log_tabular("train/agem_violation", average_only=True)
-
-                # TODO: We assume here that SuccessCounter is outermost wrapper.
-                avg_success = np.mean(env.pop_successes())
-                self.logger.log_tabular("train/success", avg_success)
-                if "seq_idx" in info:
-                    self.logger.log_tabular("train/active_env", info["seq_idx"])
-
-                self.logger.log_tabular("walltime", time.time() - start_time)
-                self.logger.dump_tabular()
-
-            current_task_t += 1
-
     @tf.function
-    def learn_on_batch(self, seq_idx, batch, episodic_batch=None):
+    def learn_on_batch(
+        self, seq_idx: int, batch: BatchDict, episodic_batch: BatchDict = None
+    ) -> Dict:
         gradients, metrics = self.get_gradients(seq_idx, **batch)
 
-        if self.algo_config.cl_method == "packnet":
-            actor_gradients, critic_gradients, alpha_gradient = gradients
-            actor_gradients = self.packnet_helper.adjust_gradients(
-                actor_gradients, self.actor.trainable_variables, tf.convert_to_tensor(seq_idx)
-            )
-            if self.algo_config.regularize_critic:
-                critic_gradients = self.packnet_helper.adjust_gradients(
-                    critic_gradients, self.critic_variables, tf.convert_to_tensor(seq_idx)
-                )
-            gradients = (actor_gradients, critic_gradients, alpha_gradient)
-        # Warning: we refer here to the int task_idx in the parent function, not
-        # the passed seq_idx.
-        elif self.algo_config.cl_method == "agem" and self.current_task_idx > 0:
-            ref_gradients, _ = self.get_gradients(seq_idx, **episodic_batch)
-            gradients, violation = self.agem_helper.adjust_gradients(gradients, ref_gradients)
-            metrics["agem_violation"] = violation
+        # TODO: Moved to the `get_gradients` method of the subclasses.
+        # if self.algo_config.cl_method == "packnet":
+        #     actor_gradients, critic_gradients, alpha_gradient = gradients
+        #     actor_gradients = self.packnet_helper.adjust_gradients(
+        #         actor_gradients, self.actor.trainable_variables, tf.convert_to_tensor(seq_idx)
+        #     )
+        #     if self.algo_config.regularize_critic:
+        #         critic_gradients = self.packnet_helper.adjust_gradients(
+        #             critic_gradients, self.critic_variables, tf.convert_to_tensor(seq_idx)
+        #         )
+        #     gradients = (actor_gradients, critic_gradients, alpha_gradient)
+        # # Warning: we refer here to the int task_idx in the parent function, not
+        # # the passed seq_idx.
+        # elif self.algo_config.cl_method == "agem" and self.current_task_idx > 0:
+        #     ref_gradients, _ = self.get_gradients(seq_idx, **episodic_batch)
+        #     gradients, violation = self.agem_helper.adjust_gradients(gradients, ref_gradients)
+        #     metrics["agem_violation"] = violation
 
         if self.algo_config.clipnorm is not None:
             actor_gradients, critic_gradients, alpha_gradient = gradients
@@ -663,7 +677,7 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
         return tf.squeeze(tf.linalg.matmul(obs1[:, -self.num_tasks :], self.all_log_alpha))
 
     @tf.function
-    def get_action(self, o, deterministic=tf.constant(False)):
+    def get_action(self, o, deterministic=tf.constant(False)) -> tf.Tensor:
         # if self.algo_config.cl_method == "vcl":
         #     # Disable multiple samples in VCL for faster evaluation
         #     action_fn = self.get_action  # = vcl_get_stable_action
@@ -676,14 +690,22 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
             return pi[0]
 
     @tf.function
-    def vcl_get_stable_action(self, o, deterministic=tf.constant(False)):
+    def vcl_get_stable_action(self, o, deterministic=tf.constant(False)) -> tf.Tensor:
         mu, log_std, pi, logp_pi = self.actor(tf.expand_dims(o, 0), samples_num=10)
         if deterministic:
             return mu[0]
         else:
             return pi[0]
 
-    def get_gradients(self, seq_idx, obs1, obs2, acts, rews, done):
+    def get_gradients(
+        self,
+        seq_idx: int,
+        obs1: tf.Tensor,
+        obs2: tf.Tensor,
+        acts: tf.Tensor,
+        rews: tf.Tensor,
+        done: bool,
+    ) -> Tuple[GradientsTuple, Dict]:
         with tf.GradientTape(persistent=True) as g:
             if self.auto_alpha:
                 log_alpha = self.get_log_alpha(obs1)
@@ -743,29 +765,10 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
                     log_alpha * tf.stop_gradient(logp_pi + self.target_entropy)
                 )
 
-            if self.algo_config.cl_method in weights_reg_methods:
-                reg_loss = self.reg_helper.regularize(self.old_params)
-                reg_loss_coef = tf.cond(
-                    seq_idx > 0, lambda: self.algo_config.cl_reg_coef, lambda: 0.0
-                )
-                reg_loss *= reg_loss_coef
-
-                pi_loss += reg_loss
-                value_loss += reg_loss
-            elif self.algo_config.cl_method == "vcl":
-                reg_loss = self.vcl_helper.regularize(
-                    seq_idx, regularize_last_layer=self.algo_config.vcl_first_task_kl
-                )
-                reg_loss_coef = tf.cond(
-                    seq_idx > 0 or self.algo_config.vcl_first_task_kl,
-                    lambda: self.algo_config.cl_reg_coef,
-                    lambda: 0.0,
-                )
-                reg_loss *= reg_loss_coef
-
-                pi_loss += reg_loss
-            else:
-                reg_loss = 0.0
+            aux_pi_loss, aux_value_loss = self.get_auxiliary_loss(seq_idx)
+            reg_loss = aux_pi_loss + aux_value_loss
+            pi_loss += aux_pi_loss
+            value_loss += aux_value_loss
 
         # Compute gradients
         actor_gradients = g.gradient(pi_loss, self.actor.trainable_variables)
@@ -781,7 +784,11 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
             # We keep them only in critic1.
             self.critic1.update_stats(q_backup, obs1)
 
-        gradients = (actor_gradients, critic_gradients, alpha_gradient)
+        gradients = GradientsTuple(
+            actor_gradients=actor_gradients,
+            critic_gradients=critic_gradients,
+            alpha_gradient=alpha_gradient,
+        )
         metrics = dict(
             pi_loss=pi_loss,
             q1_loss=q1_loss,
@@ -794,9 +801,43 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
         )
         return gradients, metrics
 
-    def apply_update(self, actor_gradients, critic_gradients, alpha_gradient):
-        self.optimizer.apply_gradients(zip(actor_gradients, self.actor.trainable_variables))
+    def get_auxiliary_loss(
+        self, seq_idx: int
+    ) -> Tuple[Union[float, tf.Tensor], Union[float, tf.Tensor]]:
+        aux_pi_loss = 0.0
+        aux_value_loss = 0.0
+        # TODO: Extract this into a subclass? (auxiliary loss kind-of?)
+        if self.algo_config.cl_method in weights_reg_methods:
+            reg_loss = self.reg_helper.regularize(self.old_params)
+            reg_loss_coef = tf.cond(seq_idx > 0, lambda: self.algo_config.cl_reg_coef, lambda: 0.0)
+            reg_loss *= reg_loss_coef
+            aux_pi_loss = reg_loss
+            aux_value_loss = reg_loss
 
+            # pi_loss += reg_loss
+            # value_loss += reg_loss
+        elif self.algo_config.cl_method == "vcl":
+            reg_loss = self.vcl_helper.regularize(
+                seq_idx, regularize_last_layer=self.algo_config.vcl_first_task_kl
+            )
+            reg_loss_coef = tf.cond(
+                seq_idx > 0 or self.algo_config.vcl_first_task_kl,
+                lambda: self.algo_config.cl_reg_coef,
+                lambda: 0.0,
+            )
+            reg_loss *= reg_loss_coef
+            aux_pi_loss = reg_loss
+            # aux_value_loss = 0
+            # pi_loss += reg_loss
+        return aux_pi_loss, aux_value_loss
+
+    def apply_update(
+        self,
+        actor_gradients: List[tf.Tensor],
+        critic_gradients: List[tf.Tensor],
+        alpha_gradient: List[tf.Tensor],
+    ):
+        self.optimizer.apply_gradients(zip(actor_gradients, self.actor.trainable_variables))
         self.optimizer.apply_gradients(zip(critic_gradients, self.critic_variables))
 
         if self.auto_alpha:
@@ -815,8 +856,7 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
     def test_agent(self, test_envs: List[gym.Env]):
         # TODO: parallelize test phase if we hit significant added walltime.
         # TODO: Adapt this a bit.
-        
-        
+
         # Dict that for each mode (deterministic or not) stores wether an episode was a success or
         # not.
         successes_per_mode: Dict[bool, List[bool]] = defaultdict(list)
@@ -905,32 +945,77 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
         return env_success, metrics
 
     def on_task_switch(self, task_id: Optional[int]):
-        # TODO: Increment the task ids when in training if it's None.
-        if not self.training or self.current_task_idx == task_id:
+        """Called by the Setting when reaching a task boundary.
+
+        When task labels are available in the setting, we also receive the index of the new task.
+        Otherwise, `task_id` will be None. 
+        
+        NOTE: We can also check if this task boundary is happening during training or testing using
+        `self.training`.
+
+        Parameters
+        ----------
+        task_id : Optional[int]
+            [description]
+        """
+        logger.info(f"on_task_switch called with task_id = {task_id} (training={self.training})")
+        if self.current_task_idx == task_id:
+            logger.info(
+                f"Ignoring call to `on_task_switch` since task_id ({task_id}) is the same as "
+                f"before ({self.current_task_idx}). (self.training={self.training})."
+            )
             return
+
         if task_id is None:
             task_id = -1
 
+        self.previous_task_idx = self.current_task_idx
         self.current_task_idx = task_id
-        self.current_task_t = 0
-        if self.algo_config.cl_method in weights_reg_methods and self.current_task_idx > 0:
-            for old_param, new_param in zip(self.old_params, self.all_common_variables):
-                old_param.assign(new_param)
-            self.reg_helper.update_reg_weights(self.replay_buffer)
 
-        elif self.algo_config.cl_method in exp_replay_methods and self.current_task_idx > 0:
-            new_episodic_mem = self.replay_buffer.sample_batch(
-                self.algo_config.episodic_mem_per_task
+        if self.training:
+            # Reset the number of training steps taken in the current task.
+            self.current_task_t = 0
+
+        # TODO: There is some code below this block that might need to be run after one, and
+        # so making a subclass that calls `super().on_task_switch` and then does this if/else block
+        # would change the order of things a bit! Might need to create another callback that the
+        # subclasses can override, just to keep the ordering the same.
+        # TODO: Figure out if this block can safely be placed after the following one.
+        # --> (NO: see the reg_methods case below, self.all_common_variables need to be this one,
+        # not the new one.)
+        # NOTE: Maybe could use something like `was_training` in addition to `training` ?
+        self.handle_task_boundary(
+            old_task=self.previous_task_idx, new_task=self.current_task_idx, training=self.training,
+        )
+
+    def handle_task_boundary(self, old_task: int, new_task: int, training: bool) -> None:
+        # NOTE: Moved this block into the subclasses.
+        # if self.algo_config.cl_method in weights_reg_methods and self.current_task_idx > 0:
+        #     for old_param, new_param in zip(self.old_params, self.all_common_variables):
+        #         old_param.assign(new_param)
+        #     self.reg_helper.update_reg_weights(self.replay_buffer)
+        # if self.algo_config.cl_method == "agem" and self.current_task_idx > 0:
+        #     new_episodic_mem = self.replay_buffer.sample_batch(
+        #         self.algo_config.episodic_mem_per_task
+        #     )
+        #     self.episodic_memory.store_multiple(**new_episodic_mem)
+        # elif self.algo_config.cl_method == "vcl" and self.current_task_idx > 0:
+        #     self.vcl_helper.update_prior()
+
+        if not training:
+            # Don't do the rest if self.training is False.
+            logger.info(
+                "Not resetting the models/buffers/optimizers since task boundary is reached during "
+                "testing."
             )
-            self.episodic_memory.store_multiple(**new_episodic_mem)
-        elif self.algo_config.cl_method == "vcl" and self.current_task_idx > 0:
-            self.vcl_helper.update_prior()
+            return
 
         if self.algo_config.reset_buffer_on_task_change:
             assert self.algo_config.buffer_type == "fifo"
             self.replay_buffer = ReplayBuffer(
                 obs_dim=self.obs_dim, act_dim=self.act_dim, size=self.algo_config.replay_size
             )
+
         if self.algo_config.reset_critic_on_task_change:
             reset_weights(self.critic1, self.critic_cl, self.critic_kwargs)
             self.target_critic1.set_weights(self.critic1.get_weights())
@@ -954,24 +1039,56 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
 
     @classmethod
     def add_argparse_args(cls, parser: ArgumentParser, dest: str) -> None:
-        return super().add_argparse_args(parser, dest=dest)
+        prefix = f"{dest}." if dest else ""
+        parser.add_arguments(cls.Config, f"--{prefix}algo_config")
+
+    @classmethod
+    def from_argparse_args(cls, args: Namespace, dest: str):
+        prefix = f"{dest}." if dest else ""
+        algo_config: SACMethod.Config = getattr(args, f"{prefix}algo_config")
+        return cls(algo_config=algo_config)
+
+    @classmethod
+    def is_applicable(cls, setting: Union[SettingType, Type[SettingType]]) -> bool:
+        """Returns wether this Method is applicable to the given setting.
+        """
+        # NOTE: Normally we'd just rely on `isinstance(target_setting, cls.target_setting)`, but in
+        # this case we also want to avoid settings with don't have a continuous action space.
+        if isinstance(setting, RLSetting):
+            action_space: gym.Space = setting.action_space
+            if isinstance(action_space, spaces.Dict):
+                action_space = action_space["y_pred"]
+            # Need continuous action spaces in this method for now.
+            return isinstance(action_space, spaces.Box)
+        return super().is_applicable(setting)
 
 
 def main():
     from sequoia.common.config import Config
-    from sequoia.settings.rl import IncrementalRLSetting
+    from sequoia.settings.rl import IncrementalRLSetting, TraditionalRLSetting
 
-    config = Config(debug=True)
-    setting = IncrementalRLSetting(
-        dataset="CW20",
-        train_steps_per_task=2_000,
-        train_max_steps=20 * 2_000,
-        test_steps_per_task=2_000,
-        test_max_steps=20 * 2_000,
-        nb_tasks=20,
+    algo_config = SACMethod.Config(start_steps=50)
+    method = SACMethod(algo_config=algo_config)
+    setting = TraditionalRLSetting(
+        dataset="MountainCarContinuous-v0",
+        nb_tasks=1,
+        train_max_steps=5_000,
+        train_steps_per_task=5_000,
+        add_done_to_observations=True,
     )
-    method = SACMethod()
-    results = setting.apply(method, config=config)
+
+    results: TraditionalRLSetting.Results = setting.apply(method, config=Config(debug=True))
+    # config = Config(debug=True)
+    # setting = IncrementalRLSetting(
+    #     dataset="CW20",
+    #     train_steps_per_task=2_000,
+    #     train_max_steps=20 * 2_000,
+    #     test_steps_per_task=2_000,
+    #     test_max_steps=20 * 2_000,
+    #     nb_tasks=20,
+    # )
+    # method = SACMethod()
+    # results = setting.apply(method, config=config)
     print(results.summary())
 
 

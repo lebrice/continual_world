@@ -1,30 +1,64 @@
+import warnings
 from typing import Optional
+
 import gym
 import numpy as np
+from continual_world.utils.wrappers import SuccessCounter
 from gym import spaces
 from gym.spaces import Box
+from gym.utils.colorize import colorize
 from sequoia.common.gym_wrappers import IterableWrapper
 from sequoia.settings.rl import RLEnvironment, RLSetting
-from sequoia.settings.rl.continual.objects import (Actions, Observations,
-                                                   Rewards)
+from sequoia.settings.rl.continual.objects import Actions, Observations, Rewards
 from sequoia.settings.rl.environment import RLEnvironment
 
-from continual_world.utils.wrappers import SuccessCounter
 
 
-def wrap_sequoia_env(env: RLEnvironment, nb_tasks_in_env: int) -> gym.Env:
-    env = SequoiaToCWWrapper(env, nb_tasks_in_env=nb_tasks_in_env)
+# @add_task_labels.register(dict)
+# def _add_task_labels_to_dict(
+#     observation: Dict[str, V], task_labels: T
+# ) -> Dict[str, Union[V, T]]:
+#     new: Dict[str, Union[V, T]] = {key: value for key, value in observation.items()}
+#     # TODO: Raise a warning instead?
+#     # assert "task_labels" not in new
+#     new["task_labels"] = task_labels
+#     return type(observation)(**new)  # type: ignore
+
+
+def wrap_sequoia_env(
+    env: RLEnvironment, nb_tasks_in_env: int, add_task_ids: bool, is_multitask: bool = False
+) -> "SequoiaToCWWrapper":
+    # TODO: Implement a wrapper to mimic the `MultiTaskEnv` API from CW when the environment is
+    # stationary.
+    env = SequoiaToCWWrapper(env, nb_tasks_in_env=nb_tasks_in_env, add_task_labels=add_task_ids)
     env = SuccessCounter(env)
     # TODO: Missing a 'name' property, which would usually be the task name in metaworld.
+    # There doesn't seem to be a way to get the name of the task programmatically atm.
     # from metaworld.envs.mujoco.sawyer_xyz.sawyer_xyz_env import SawyerXYZEnv
-    env.name = "fake-name"
+    env.name = "fake-task-name"
     return env
+
 
 def concat_x_and_t(observation: Observations, nb_tasks: int) -> np.ndarray:
     x = observation.x
     task_id = observation.task_labels
+    if task_id is None:
+        return x
     # NOTE: Assuming that the observations aren't batched for now.
     ts = np.zeros(nb_tasks)
+    if task_id >= nb_tasks:
+        # BUG: Getting a task_id greater than the number of tasks in TraditionalRLSetting?!
+        warnings.warn(
+            RuntimeWarning(
+                colorize(
+                    f"BUG: Getting a task id of {task_id} when we expected the total number of "
+                    f"tasks to be {nb_tasks}! Will change the task id to a value of {nb_tasks-1} "
+                    f" instead as a temporary fix. (obs = {observation})",
+                    "red",
+                )
+            )
+        )
+        task_id = nb_tasks - 1
     ts[task_id] = 1
     return np.concatenate([x, ts], axis=-1)
 
@@ -47,10 +81,15 @@ class SequoiaToCWWrapper(gym.Wrapper):
         x_space = env.observation_space.x
         t_space = env.observation_space.task_labels
         self.onehot_len = t_space.n
-        self.observation_space = Box(
-            low=np.concatenate([x_space.low, np.zeros(self.onehot_len)]),
-            high=np.concatenate([x_space.high, np.ones(self.onehot_len)]),
-        )
+        self.add_task_labels = add_task_labels
+        if self.add_task_labels:
+            self.observation_space = Box(
+                low=np.concatenate([x_space.low, np.zeros(self.onehot_len)]),
+                high=np.concatenate([x_space.high, np.ones(self.onehot_len)]),
+            )
+        else:
+            self.observation_space = x_space
+
         if isinstance(self.env.action_space, spaces.Dict):
             self.action_space = self.env.action_space["y_pred"]
         if isinstance(self.env.reward_space, spaces.Dict):
@@ -60,7 +99,7 @@ class SequoiaToCWWrapper(gym.Wrapper):
         self.cur_seq_idx: Optional[int] = None
         # self.steps_per_env = nb_tasks * self.env.max_steps
         # self.steps_limit = self.num_envs * self.steps_per_env
-    
+
     def action(self, action: Actions):
         if isinstance(action, Actions):
             return action.y_pred
@@ -73,6 +112,9 @@ class SequoiaToCWWrapper(gym.Wrapper):
 
     def observation(self, observation: RLSetting.Observations) -> np.ndarray:
         x = observation.x
+        if not self.add_task_labels:
+            return x
+
         task_id = observation.task_labels
         self.cur_seq_idx = task_id
         ts = np.zeros(self.onehot_len)
@@ -81,7 +123,7 @@ class SequoiaToCWWrapper(gym.Wrapper):
 
     def reset(self):
         return self.observation(super().reset())
-    
+
     def step(self, action: Actions):
         action = self.action(action)
         obs, reward, done, info = super().step(action)
