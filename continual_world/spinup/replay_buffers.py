@@ -1,3 +1,4 @@
+from continual_world.spinup.objects import BatchDict
 import random
 import numpy as np
 import tensorflow as tf
@@ -25,7 +26,7 @@ class ReplayBuffer:
     self.ptr = (self.ptr + 1) % self.max_size
     self.size = min(self.size + 1, self.max_size)
 
-  def sample_batch(self, batch_size):
+  def sample_batch(self, batch_size: int) -> BatchDict:
     idxs = np.random.randint(0, self.size, size=batch_size)
     return dict(obs1=tf.convert_to_tensor(self.obs1_buf[idxs]),
                 obs2=tf.convert_to_tensor(self.obs2_buf[idxs]),
@@ -60,7 +61,7 @@ class EpisodicMemory:
     self.done_buf[range_start:range_end] = done
     self.size = self.size + len(obs1)
 
-  def sample_batch(self, batch_size):
+  def sample_batch(self, batch_size) -> BatchDict:
     batch_size = min(batch_size, self.size)
     idxs = np.random.choice(self.size, size=batch_size, replace=False)
     return dict(obs1=tf.convert_to_tensor(self.obs1_buf[idxs]),

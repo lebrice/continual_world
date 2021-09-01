@@ -7,16 +7,7 @@ from sequoia.settings.rl import RLSetting
 from sequoia.settings.rl.incremental.setting import IncrementalRLSetting
 from .base_sac_method import SACMethod
 from sequoia.common.metrics import EpisodeMetrics
-import tensorflow as tf
 from sequoia.methods.random_baseline import RandomBaselineMethod
-
-
-# IDEA: To help with debugging, prevent the tf.function decorators from working when testing.
-@pytest.fixture(autouse=True)
-def disable_tf_function_wrappers():
-    tf.config.run_functions_eagerly(True)
-    yield
-    tf.config.run_functions_eagerly(False)
 
 
 class TestSACMethod(MethodTests):
@@ -86,10 +77,11 @@ class TestSACMethod(MethodTests):
     def test_from_args(self):
         from simple_parsing import ArgumentParser
         import shlex
+
         parser = ArgumentParser()
-        self.Method.add_argparse_args(parser, dest="method")
+        self.Method.add_argparse_args(parser, dest="")
         args = parser.parse_args([])
-        method = self.Method.from_argparse_args(args, dest="method")
+        method = self.Method.from_argparse_args(args, dest="")
         assert isinstance(method, self.Method)
         # TODO: Not sure how to check for this here.
         # assert method.algo_config.cl_method ==

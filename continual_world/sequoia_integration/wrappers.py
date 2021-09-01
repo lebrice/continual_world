@@ -1,9 +1,11 @@
 import warnings
 from typing import Optional
 
+from gym.wrappers import TimeLimit
 import gym
 import numpy as np
-from continual_world.utils.wrappers import SuccessCounter
+from continual_world.utils.wrappers import SuccessCounter, ScaleReward
+from continual_world.envs import META_WORLD_TIME_HORIZON
 from gym import spaces
 from gym.spaces import Box
 from gym.utils.colorize import colorize
@@ -11,7 +13,6 @@ from sequoia.common.gym_wrappers import IterableWrapper
 from sequoia.settings.rl import RLEnvironment, RLSetting
 from sequoia.settings.rl.continual.objects import Actions, Observations, Rewards
 from sequoia.settings.rl.environment import RLEnvironment
-
 
 
 # @add_task_labels.register(dict)
@@ -26,12 +27,24 @@ from sequoia.settings.rl.environment import RLEnvironment
 
 
 def wrap_sequoia_env(
-    env: RLEnvironment, nb_tasks_in_env: int, add_task_ids: bool, is_multitask: bool = False
+    env: RLEnvironment,
+    nb_tasks_in_env: int,
+    add_task_ids: bool,
+    is_multitask: bool = False,
+    scale_reward: bool = False,
+    div_by_return: bool = False,
 ) -> "SequoiaToCWWrapper":
     # TODO: Implement a wrapper to mimic the `MultiTaskEnv` API from CW when the environment is
     # stationary.
-    env = SequoiaToCWWrapper(env, nb_tasks_in_env=nb_tasks_in_env, add_task_labels=add_task_ids)
+    env = SequoiaToCWWrapper(
+        env, nb_tasks_in_env=nb_tasks_in_env, add_task_labels=add_task_ids
+    )
+    env = TimeLimit(env, max_episode_steps=META_WORLD_TIME_HORIZON)
     env = SuccessCounter(env)
+
+    if scale_reward:
+        env = ScaleReward(env, div_by_return=div_by_return)
+
     # TODO: Missing a 'name' property, which would usually be the task name in metaworld.
     # There doesn't seem to be a way to get the name of the task programmatically atm.
     # from metaworld.envs.mujoco.sawyer_xyz.sawyer_xyz_env import SawyerXYZEnv
@@ -48,23 +61,25 @@ def concat_x_and_t(observation: Observations, nb_tasks: int) -> np.ndarray:
     ts = np.zeros(nb_tasks)
     if task_id >= nb_tasks:
         # BUG: Getting a task_id greater than the number of tasks in TraditionalRLSetting?!
-        warnings.warn(
-            RuntimeWarning(
-                colorize(
-                    f"BUG: Getting a task id of {task_id} when we expected the total number of "
-                    f"tasks to be {nb_tasks}! Will change the task id to a value of {nb_tasks-1} "
-                    f" instead as a temporary fix. (obs = {observation})",
-                    "red",
-                )
-            )
-        )
+        # warnings.warn(
+        #     RuntimeWarning(
+        #         colorize(
+        #             f"BUG: Getting a task id of {task_id} when we expected the total number of "
+        #             f"tasks to be {nb_tasks}! Will change the task id to a value of {nb_tasks-1} "
+        #             f" instead as a temporary fix. (obs = {observation})",
+        #             "red",
+        #         )
+        #     )
+        # )
         task_id = nb_tasks - 1
     ts[task_id] = 1
     return np.concatenate([x, ts], axis=-1)
 
 
 class SequoiaToCWWrapper(gym.Wrapper):
-    def __init__(self, env: RLEnvironment, nb_tasks_in_env: int, add_task_labels: bool = False):
+    def __init__(
+        self, env: RLEnvironment, nb_tasks_in_env: int, add_task_labels: bool = False
+    ):
         """Create a wrapper around a gym.Env from Sequoia so it matches the format from cw.
         
         Parameters

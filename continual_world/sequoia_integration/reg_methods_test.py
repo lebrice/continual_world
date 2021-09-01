@@ -3,7 +3,6 @@ from .base_sac_method_test import TestSACMethod as SACMethodTests
 from .reg_methods import RegMethod, L2RegMethod, EWCRegMethod, MASRegMethod
 
 
-
 class RegMethodTests(SACMethodTests):
     Method: ClassVar[Type[RegMethod]]
 

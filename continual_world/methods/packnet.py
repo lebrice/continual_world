@@ -50,7 +50,7 @@ class PackNetHelper:
       owner.assign(owner * tf.cast(keep_mask, tf.int32) +
                    (seq_idx + 1) * tf.cast(~keep_mask, tf.int32))
 
-  def set_view(self, seq_idx):
+  def set_view(self, seq_idx: int) -> None:
     if seq_idx == -1:
       for ref, saved_variable in self.saved_variables.items():
         v = ref.deref()

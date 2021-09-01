@@ -49,20 +49,13 @@ from tensorflow.python.types.core import Value
 from tqdm import tqdm
 
 try:
-    from typing import Literal
+    from typing import TypedDict
 except ImportError:
-    from typing_extensions import Literal  # type: ignore
-
+    from typing_extensions import TypedDict
 
 # weights_reg_methods = ["l2", "ewc", "mas"]
 # exp_replay_methods = ["agem"]
 logger = logging.getLogger(__name__)
-
-
-try:
-    from typing import TypedDict
-except ImportError:
-    from typing_extensions import TypedDict
 
 
 class BatchDict(TypedDict):
@@ -104,15 +97,13 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
         reset_critic_on_task_change: bool = False
         activation: str = "lrelu"
         use_layer_norm: bool = True
-        scale_reward: bool = False
-        div_by_return: bool = False
+        # scale_reward: bool = False
+        # div_by_return: bool = False
         lr: float = 1e-3
         alpha: str = "auto"
         use_popart: bool = False
         regularize_critic: bool = False
         cl_reg_coef: float = 0.0
-        vcl_first_task_kl: bool = True
-        vcl_variational_ln: bool = False
         episodic_mem_per_task: int = 0
         episodic_batch_size: int = 0
         randomization: str = "random_init_all"
@@ -188,7 +179,6 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
         # The arguments to be pased to `self.actor_cl` (the actor class constructor).
         self.actor_kwargs: Dict = {}
         self.critic_kwargs: Dict = {}
-        self.previous_task_idx: int = -1
         self.current_task_idx: int = -1
         self.logger: EpochLogger
         self.replay_buffer: Union[ReplayBuffer, ReservoirReplayBuffer]
@@ -228,8 +218,12 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
 
         self.num_tasks = setting.nb_tasks
         self.stationary_context = setting.stationary_context
-        self.nb_tasks_in_train_env = setting.nb_tasks if setting.stationary_context else 1
-        self.nb_tasks_in_valid_env = setting.nb_tasks if setting.stationary_context else 1
+        self.nb_tasks_in_train_env = (
+            setting.nb_tasks if setting.stationary_context else 1
+        )
+        self.nb_tasks_in_valid_env = (
+            setting.nb_tasks if setting.stationary_context else 1
+        )
 
         self.current_task_idx = -1
 
@@ -238,7 +232,9 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
             config=dict(**asdict(self.task_config), **asdict(self.algo_config)),
         )
         # Wether or not we add the task IDS to the observations.
-        self.add_task_ids = setting.task_labels_at_train_time and setting.task_labels_at_test_time
+        self.add_task_ids = (
+            setting.task_labels_at_train_time and setting.task_labels_at_test_time
+        )
         self.obs_dim = np.prod(setting.observation_space.x.shape)
         if setting.task_labels_at_train_time and setting.task_labels_at_test_time:
             # The task ids will be concatenated to the observations.
@@ -262,7 +258,9 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
         np.random.seed(self.task_config.seed)
 
         if self.algo_config.use_popart:
-            assert self.algo_config.multihead_archs, "PopArt works only in the multi-head setup"
+            assert (
+                self.algo_config.multihead_archs
+            ), "PopArt works only in the multi-head setup"
             self.critic_cl = PopArtMlpCritic
         else:
             self.critic_cl = MlpCritic
@@ -284,7 +282,9 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
                 np.ones((self.num_tasks, 1), dtype=np.float32), trainable=True
             )
             if self.algo_config.target_output_std is None:
-                self.target_entropy = -np.prod(setting.action_space.shape).astype(np.float32)
+                self.target_entropy = -np.prod(setting.action_space.shape).astype(
+                    np.float32
+                )
             else:
                 target_1d_entropy = np.log(
                     self.algo_config.target_output_std * math.sqrt(2 * math.pi * math.e)
@@ -348,7 +348,7 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
         obs, ep_ret, ep_len = env.reset(), 0, 0
 
         # Main loop: collect experience in env and update/log each epoch
-        learn_on_batch = self.get_learn_on_batch()
+        # learn_on_batch = self.get_learn_on_batch()
         current_task_t = 0
         reg_weights = None
 
@@ -410,28 +410,11 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
                 # is an interval, i.e. "perform 50 updates every 50 steps".
 
                 for j in range(self.algo_config.update_every):
-
-                    def sample_batches(self) -> Tuple[BatchDict, Optional[BatchDict]]:
-                        batch = self.replay_buffer.sample_batch(self.algo_config.batch_size)
-                        episodic_batch = None
-                        return batch, episodic_batch
-
-                    batch = self.replay_buffer.sample_batch(self.algo_config.batch_size)
-                    assert False, batch
-                    episodic_batch = None
-                    # AGEM:
-                    if (
-                        self.algo_config.cl_method == "agem"
-                        # NOTE: Above check is equivalent to previous:
-                        # self.algo_config.cl_method in exp_replay_methods
-                        and self.current_task_idx > 0
-                    ):
-                        episodic_batch = self.episodic_memory.sample_batch(
-                            self.algo_config.episodic_batch_size
-                        )
-
+                    batch, episodic_batch = self.sample_batches()
                     results = self.learn_on_batch(
-                        tf.convert_to_tensor(self.current_task_idx), batch, episodic_batch
+                        tf.convert_to_tensor(self.current_task_idx),
+                        batch,
+                        episodic_batch,
                     )
                     self.logger.store(
                         {
@@ -449,51 +432,28 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
                     for i in range(self.num_tasks):
                         if self.auto_alpha:
                             self.logger.store(
-                                {f"train/alpha/{i}": float(tf.math.exp(self.all_log_alpha[i][0]))}
+                                {
+                                    f"train/alpha/{i}": float(
+                                        tf.math.exp(self.all_log_alpha[i][0])
+                                    )
+                                }
                             )
                         # if self.critic_cl is PopArtMlpCritic: # (NOTE: using isinstance instead)
                         if isinstance(self.critic1, PopArtMlpCritic):
                             self.logger.store(
                                 {
-                                    f"train/popart_mean/{i}": self.critic1.moment1[i][0],
+                                    f"train/popart_mean/{i}": self.critic1.moment1[i][
+                                        0
+                                    ],
                                     f"train/popart_std/{i}": self.critic1.sigma[i][0],
                                 }
                             )
 
-            # TODO: This used to check for properties on the env. Make sure that it also works like
-            # this:
-            # steps_per_task = env.steps_per_env
-            # NOTE: (@lebrice) This is basically a check for a task boundary, right?
-            # TODO: Move this to `on_task_switch`?
-            # if (
-            #     self.algo_config.cl_method == "packnet"
-            #     and (current_task_t + 1 == steps_per_task)
-            #     and self.current_task_idx < self.num_tasks - 1
-            # ):
-            #     if self.current_task_idx == 0:
-            #         self.packnet_helper.set_freeze_biases_and_normalization(True)
-
-            #     # Each task gets equal share of 'kernel' weights.
-            #     if self.algo_config.packnet_fake_num_tasks is not None:
-            #         num_tasks_left = (
-            #             self.algo_config.packnet_fake_num_tasks - self.current_task_idx - 1
-            #         )
-            #     else:
-            #         num_tasks_left = env.num_envs - self.current_task_idx - 1
-            #     prune_perc = num_tasks_left / (num_tasks_left + 1)
-            #     self.packnet_helper.prune(prune_perc, self.current_task_idx)
-
-            #     reset_optimizer(self.optimizer)
-
-            #     for _ in range(self.algo_config.packnet_retrain_steps):
-            #         batch = self.replay_buffer.sample_batch(self.algo_config.batch_size)
-            #         self.learn_on_batch(tf.convert_to_tensor(self.current_task_idx), batch)
-
-            #     reset_optimizer(self.optimizer)
-
             # End of epoch wrap-up
             if ((t + 1) % self.task_config.log_every == 0) or (t + 1 == steps):
-                epoch = (t + 1 + self.task_config.log_every - 1) // self.task_config.log_every
+                epoch = (
+                    t + 1 + self.task_config.log_every - 1
+                ) // self.task_config.log_every
 
                 # Save model
                 if (epoch % self.algo_config.save_freq_epochs == 0) or (t + 1 == steps):
@@ -501,16 +461,22 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
                     if self.current_task_idx == -1:
                         dir_prefixes.append("./checkpoints")
                     else:
-                        dir_prefixes.append("./checkpoints/task{}".format(self.current_task_idx))
+                        dir_prefixes.append(
+                            "./checkpoints/task{}".format(self.current_task_idx)
+                        )
                         if self.current_task_idx == self.num_tasks - 1:
                             dir_prefixes.append("./checkpoints")
 
                     for prefix in dir_prefixes:
                         self.actor.save_weights(os.path.join(prefix, "actor"))
                         self.critic1.save_weights(os.path.join(prefix, "critic1"))
-                        self.target_critic1.save_weights(os.path.join(prefix, "target_critic1"))
+                        self.target_critic1.save_weights(
+                            os.path.join(prefix, "target_critic1")
+                        )
                         self.critic2.save_weights(os.path.join(prefix, "critic2"))
-                        self.target_critic2.save_weights(os.path.join(prefix, "target_critic2"))
+                        self.target_critic2.save_weights(
+                            os.path.join(prefix, "target_critic2")
+                        )
 
                 # Test the performance of the deterministic version of the agent.
                 self.test_agent(test_envs)
@@ -529,11 +495,17 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
                 self.logger.log_tabular("train/loss_q2", average_only=True)
                 for i in range(self.num_tasks):
                     if self.auto_alpha:
-                        self.logger.log_tabular("train/alpha/{}".format(i), average_only=True)
+                        self.logger.log_tabular(
+                            "train/alpha/{}".format(i), average_only=True
+                        )
                     # if self.critic_cl is PopArtMlpCritic:
                     if isinstance(self.critic1, PopArtMlpCritic):
-                        self.logger.log_tabular("train/popart_mean/{}".format(i), average_only=True)
-                        self.logger.log_tabular("train/popart_std/{}".format(i), average_only=True)
+                        self.logger.log_tabular(
+                            "train/popart_mean/{}".format(i), average_only=True
+                        )
+                        self.logger.log_tabular(
+                            "train/popart_std/{}".format(i), average_only=True
+                        )
                 self.logger.log_tabular("train/loss_reg", average_only=True)
                 self.logger.log_tabular("train/agem_violation", average_only=True)
 
@@ -548,15 +520,24 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
 
             current_task_t += 1
 
+    def sample_batches(self) -> Tuple[BatchDict, Optional[BatchDict]]:
+        batch = self.replay_buffer.sample_batch(self.algo_config.batch_size)
+        episodic_batch = None
+        return batch, episodic_batch
+
     def create_replay_buffer(self) -> ReplayBuffer:
         # Create experience buffer
         if self.algo_config.buffer_type == "fifo":
             return ReplayBuffer(
-                obs_dim=self.obs_dim, act_dim=self.act_dim, size=self.algo_config.replay_size
+                obs_dim=self.obs_dim,
+                act_dim=self.act_dim,
+                size=self.algo_config.replay_size,
             )
         elif self.algo_config.buffer_type == "reservoir":
             return ReservoirReplayBuffer(
-                obs_dim=self.obs_dim, act_dim=self.act_dim, size=self.algo_config.replay_size
+                obs_dim=self.obs_dim,
+                act_dim=self.act_dim,
+                size=self.algo_config.replay_size,
             )
         else:
             raise NotImplementedError(self.algo_config.buffer_type)
@@ -574,8 +555,8 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
         actor_kwargs["action_space"] = setting.action_space
         actor_kwargs["input_dim"] = self.obs_dim
 
-        if self.algo_config.cl_method == "vcl":
-            self.actor_kwargs["variational_ln"] = self.algo_config.vcl_variational_ln
+        # if self.algo_config.cl_method == "vcl":
+        #     self.actor_kwargs["variational_ln"] = self.algo_config.vcl_variational_ln
         return actor_kwargs
 
     def get_critic_kwargs(self, setting: RLSetting) -> Dict:
@@ -603,7 +584,9 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
         self.target_critic2 = self.critic_cl(**self.critic_kwargs)
         self.target_critic2.set_weights(self.critic2.get_weights())
 
-        self.critic_variables = self.critic1.trainable_variables + self.critic2.trainable_variables
+        self.critic_variables = (
+            self.critic1.trainable_variables + self.critic2.trainable_variables
+        )
         self.all_variables = self.actor.trainable_variables + self.critic_variables
         self.all_common_variables = (
             self.actor.common_variables
@@ -616,7 +599,9 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
         self._last_task_ids = None
 
     def get_actions(
-        self, observations: DiscreteTaskAgnosticRLSetting.Observations, action_space: gym.Space
+        self,
+        observations: DiscreteTaskAgnosticRLSetting.Observations,
+        action_space: gym.Space,
     ) -> Union[DiscreteTaskAgnosticRLSetting.Actions, Any]:
         # BUG: In TraditionalRLSetting, we get some weird task ids during test time, makes no sense.
         if observations.task_labels != self._last_task_ids:
@@ -636,29 +621,13 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
     def learn_on_batch(
         self, seq_idx: int, batch: BatchDict, episodic_batch: BatchDict = None
     ) -> Dict:
-        gradients, metrics = self.get_gradients(seq_idx, **batch)
-
-        # TODO: Moved to the `get_gradients` method of the subclasses.
-        # if self.algo_config.cl_method == "packnet":
-        #     actor_gradients, critic_gradients, alpha_gradient = gradients
-        #     actor_gradients = self.packnet_helper.adjust_gradients(
-        #         actor_gradients, self.actor.trainable_variables, tf.convert_to_tensor(seq_idx)
-        #     )
-        #     if self.algo_config.regularize_critic:
-        #         critic_gradients = self.packnet_helper.adjust_gradients(
-        #             critic_gradients, self.critic_variables, tf.convert_to_tensor(seq_idx)
-        #         )
-        #     gradients = (actor_gradients, critic_gradients, alpha_gradient)
-        # # Warning: we refer here to the int task_idx in the parent function, not
-        # # the passed seq_idx.
-        # elif self.algo_config.cl_method == "agem" and self.current_task_idx > 0:
-        #     ref_gradients, _ = self.get_gradients(seq_idx, **episodic_batch)
-        #     gradients, violation = self.agem_helper.adjust_gradients(gradients, ref_gradients)
-        #     metrics["agem_violation"] = violation
+        gradients, metrics = self.get_gradients(
+            seq_idx, **batch, episodic_batch=episodic_batch
+        )
 
         if self.algo_config.clipnorm is not None:
             actor_gradients, critic_gradients, alpha_gradient = gradients
-            gradients = (
+            gradients = GradientsTuple(
                 tf.clip_by_global_norm(actor_gradients, self.algo_config.clipnorm)[0],
                 tf.clip_by_global_norm(critic_gradients, self.algo_config.clipnorm)[0],
                 tf.clip_by_norm(alpha_gradient, self.algo_config.clipnorm),
@@ -674,7 +643,9 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
 
     @tf.function
     def get_log_alpha(self, obs1):
-        return tf.squeeze(tf.linalg.matmul(obs1[:, -self.num_tasks :], self.all_log_alpha))
+        return tf.squeeze(
+            tf.linalg.matmul(obs1[:, -self.num_tasks :], self.all_log_alpha)
+        )
 
     @tf.function
     def get_action(self, o, deterministic=tf.constant(False)) -> tf.Tensor:
@@ -705,6 +676,7 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
         acts: tf.Tensor,
         rews: tf.Tensor,
         done: bool,
+        episodic_batch: BatchDict = None,
     ) -> Tuple[GradientsTuple, Dict]:
         with tf.GradientTape(persistent=True) as g:
             if self.auto_alpha:
@@ -801,34 +773,9 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
         )
         return gradients, metrics
 
-    def get_auxiliary_loss(
-        self, seq_idx: int
-    ) -> Tuple[Union[float, tf.Tensor], Union[float, tf.Tensor]]:
-        aux_pi_loss = 0.0
-        aux_value_loss = 0.0
-        # TODO: Extract this into a subclass? (auxiliary loss kind-of?)
-        if self.algo_config.cl_method in weights_reg_methods:
-            reg_loss = self.reg_helper.regularize(self.old_params)
-            reg_loss_coef = tf.cond(seq_idx > 0, lambda: self.algo_config.cl_reg_coef, lambda: 0.0)
-            reg_loss *= reg_loss_coef
-            aux_pi_loss = reg_loss
-            aux_value_loss = reg_loss
-
-            # pi_loss += reg_loss
-            # value_loss += reg_loss
-        elif self.algo_config.cl_method == "vcl":
-            reg_loss = self.vcl_helper.regularize(
-                seq_idx, regularize_last_layer=self.algo_config.vcl_first_task_kl
-            )
-            reg_loss_coef = tf.cond(
-                seq_idx > 0 or self.algo_config.vcl_first_task_kl,
-                lambda: self.algo_config.cl_reg_coef,
-                lambda: 0.0,
-            )
-            reg_loss *= reg_loss_coef
-            aux_pi_loss = reg_loss
-            # aux_value_loss = 0
-            # pi_loss += reg_loss
+    def get_auxiliary_loss(self, seq_idx: int) -> Tuple[tf.Tensor, tf.Tensor]:
+        aux_pi_loss = tf.zeros([1])
+        aux_value_loss = tf.zeros([1])
         return aux_pi_loss, aux_value_loss
 
     def apply_update(
@@ -837,7 +784,9 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
         critic_gradients: List[tf.Tensor],
         alpha_gradient: List[tf.Tensor],
     ):
-        self.optimizer.apply_gradients(zip(actor_gradients, self.actor.trainable_variables))
+        self.optimizer.apply_gradients(
+            zip(actor_gradients, self.actor.trainable_variables)
+        )
         self.optimizer.apply_gradients(zip(critic_gradients, self.critic_variables))
 
         if self.auto_alpha:
@@ -847,11 +796,15 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
         for v, target_v in zip(
             self.critic1.trainable_variables, self.target_critic1.trainable_variables
         ):
-            target_v.assign(self.algo_config.polyak * target_v + (1 - self.algo_config.polyak) * v)
+            target_v.assign(
+                self.algo_config.polyak * target_v + (1 - self.algo_config.polyak) * v
+            )
         for v, target_v in zip(
             self.critic2.trainable_variables, self.target_critic2.trainable_variables
         ):
-            target_v.assign(self.algo_config.polyak * target_v + (1 - self.algo_config.polyak) * v)
+            target_v.assign(
+                self.algo_config.polyak * target_v + (1 - self.algo_config.polyak) * v
+            )
 
     def test_agent(self, test_envs: List[gym.Env]):
         # TODO: parallelize test phase if we hit significant added walltime.
@@ -878,6 +831,12 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
             mode = "deterministic" if deterministic else "stochastic"
             self.logger.log_tabular(f"test/{mode}/average_success", np.mean(successes))
 
+    def on_test_episode_start(self, seq_idx: int, episode: int) -> None:
+        pass
+
+    def on_test_loop_end(self) -> None:
+        pass
+
     def test_agent_on_env(
         self,
         test_env: gym.Env,
@@ -888,7 +847,9 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
         mode = "deterministic" if deterministic else "stochastic"
         # NOTE: Changed this next line, since we may be calling this with a single env for task 4
         # for example.
-        metrics: Dict[int, Dict[str, List[float]]] = defaultdict(lambda: defaultdict(list))
+        metrics: Dict[int, Dict[str, List[float]]] = defaultdict(
+            lambda: defaultdict(list)
+        )
         total_steps = 0
         for episode in range(max_episodes) if max_episodes else itertools.count():
             # TODO: The number of test episodes is too large actually! Need to check instead
@@ -909,8 +870,7 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
                 seq_idx = -1
             # prefix = key_prefix or f"test/{mode}/{seq_idx}/{test_env.name}"
 
-            if self.algo_config.cl_method == "packnet":
-                self.packnet_helper.set_view(seq_idx)
+            self.on_test_episode_start(seq_idx=seq_idx, episode=episode)
 
             while not (done or (ep_len == self.task_config.max_ep_len)):
                 if test_env.is_closed() or total_steps >= test_env.max_steps:
@@ -919,7 +879,9 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
 
                 assert obs is not None
                 obs, reward, done, _ = test_env.step(
-                    self.get_action(tf.convert_to_tensor(obs), tf.constant(deterministic))
+                    self.get_action(
+                        tf.convert_to_tensor(obs), tf.constant(deterministic)
+                    )
                 )
                 total_steps += 1
                 ep_ret += reward
@@ -927,9 +889,7 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
 
             if truncated:
                 print(f"Not logging episode {episode} since it was truncated.")
-
-            if not truncated:
-                # NOTE: The else block of a while loop is only reached when we don't break.
+            else:
                 # In this case, we only log stuff when it's the result of a 'full' test
                 # episode.
                 # self.logger.store(
@@ -938,8 +898,7 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
                 metrics[seq_idx]["return"].append(ep_ret)
                 metrics[seq_idx]["ep_length"].append(ep_len)
 
-        if self.algo_config.cl_method == "packnet":
-            self.packnet_helper.set_view(-1)
+        self.on_test_loop_end()
 
         env_success = test_env.pop_successes()
         return env_success, metrics
@@ -958,7 +917,9 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
         task_id : Optional[int]
             [description]
         """
-        logger.info(f"on_task_switch called with task_id = {task_id} (training={self.training})")
+        logger.info(
+            f"on_task_switch called with task_id = {task_id} (training={self.training})"
+        )
         if self.current_task_idx == task_id:
             logger.info(
                 f"Ignoring call to `on_task_switch` since task_id ({task_id}) is the same as "
@@ -969,40 +930,17 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
         if task_id is None:
             task_id = -1
 
-        self.previous_task_idx = self.current_task_idx
-        self.current_task_idx = task_id
-
         if self.training:
             # Reset the number of training steps taken in the current task.
             self.current_task_t = 0
 
-        # TODO: There is some code below this block that might need to be run after one, and
-        # so making a subclass that calls `super().on_task_switch` and then does this if/else block
-        # would change the order of things a bit! Might need to create another callback that the
-        # subclasses can override, just to keep the ordering the same.
-        # TODO: Figure out if this block can safely be placed after the following one.
-        # --> (NO: see the reg_methods case below, self.all_common_variables need to be this one,
-        # not the new one.)
-        # NOTE: Maybe could use something like `was_training` in addition to `training` ?
-        self.handle_task_boundary(
-            old_task=self.previous_task_idx, new_task=self.current_task_idx, training=self.training,
-        )
+        self.current_task_idx = task_id
 
-    def handle_task_boundary(self, old_task: int, new_task: int, training: bool) -> None:
-        # NOTE: Moved this block into the subclasses.
-        # if self.algo_config.cl_method in weights_reg_methods and self.current_task_idx > 0:
-        #     for old_param, new_param in zip(self.old_params, self.all_common_variables):
-        #         old_param.assign(new_param)
-        #     self.reg_helper.update_reg_weights(self.replay_buffer)
-        # if self.algo_config.cl_method == "agem" and self.current_task_idx > 0:
-        #     new_episodic_mem = self.replay_buffer.sample_batch(
-        #         self.algo_config.episodic_mem_per_task
-        #     )
-        #     self.episodic_memory.store_multiple(**new_episodic_mem)
-        # elif self.algo_config.cl_method == "vcl" and self.current_task_idx > 0:
-        #     self.vcl_helper.update_prior()
+        # TODO: Can get a bit complicated to try and give an `old_task` and a `new_task`, because
+        # there are boundaries between test/train in TaskIncrementalRL for example.
+        self.handle_task_boundary(task_id=self.current_task_idx, training=self.training)
 
-        if not training:
+        if not self.training:
             # Don't do the rest if self.training is False.
             logger.info(
                 "Not resetting the models/buffers/optimizers since task boundary is reached during "
@@ -1013,7 +951,9 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
         if self.algo_config.reset_buffer_on_task_change:
             assert self.algo_config.buffer_type == "fifo"
             self.replay_buffer = ReplayBuffer(
-                obs_dim=self.obs_dim, act_dim=self.act_dim, size=self.algo_config.replay_size
+                obs_dim=self.obs_dim,
+                act_dim=self.act_dim,
+                size=self.algo_config.replay_size,
             )
 
         if self.algo_config.reset_critic_on_task_change:
@@ -1037,15 +977,20 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
             + self.critic2.common_variables
         )
 
-    @classmethod
-    def add_argparse_args(cls, parser: ArgumentParser, dest: str) -> None:
-        prefix = f"{dest}." if dest else ""
-        parser.add_arguments(cls.Config, f"--{prefix}algo_config")
+    def handle_task_boundary(self, task_id: int, training: bool) -> None:
+        pass
 
     @classmethod
-    def from_argparse_args(cls, args: Namespace, dest: str):
+    def add_argparse_args(cls, parser: ArgumentParser, dest: str = "") -> None:
+        # TODO: Use the values from `defaults.py` depending on what kind of Setting we need to set
+        # arguments for. (Also need to detect the setting type on which this is going to be used!)
         prefix = f"{dest}." if dest else ""
-        algo_config: SACMethod.Config = getattr(args, f"{prefix}algo_config")
+        parser.add_arguments(cls.Config, f"{prefix}algo_config")
+
+    @classmethod
+    def from_argparse_args(cls, args: Namespace, dest: str = ""):
+        args = getattr(args, dest) if dest else args
+        algo_config: SACMethod.Config = getattr(args, "algo_config")
         return cls(algo_config=algo_config)
 
     @classmethod
@@ -1077,7 +1022,9 @@ def main():
         add_done_to_observations=True,
     )
 
-    results: TraditionalRLSetting.Results = setting.apply(method, config=Config(debug=True))
+    results: TraditionalRLSetting.Results = setting.apply(
+        method, config=Config(debug=True)
+    )
     # config = Config(debug=True)
     # setting = IncrementalRLSetting(
     #     dataset="CW20",

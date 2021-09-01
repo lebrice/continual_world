@@ -1,5 +1,8 @@
 from dataclasses import dataclass
-from typing import Type
+from typing import Dict, Type, Tuple
+import tensorflow as tf
+
+from sequoia.settings.rl.setting import RLSetting
 
 from continual_world.config import AlgoConfig
 from continual_world.methods.vcl import VclHelper, VclMlpActor
@@ -12,7 +15,8 @@ from .base_sac_method import SACMethod
 class VCL(SACMethod):
     @dataclass
     class Config(SACMethod.Config):
-        packnet_retrain_steps: int = 0
+        vcl_first_task_kl: bool = True
+        vcl_variational_ln: bool = False
 
     def __init__(self, algo_config: "VCL.Config"):
         super().__init__(algo_config=algo_config)
@@ -22,14 +26,38 @@ class VCL(SACMethod):
         # Change the type of actor, compared to the base SAC method.
         self.actor_cl: Type[VclMlpActor] = VclMlpActor
 
+    def get_actor_kwargs(self, setting: RLSetting) -> Dict:
+        actor_kwargs = super().get_actor_kwargs(setting)
+        actor_kwargs["variational_ln"] = self.algo_config.vcl_variational_ln
+        return actor_kwargs
+
     def configure(self, setting: DiscreteTaskAgnosticRLSetting) -> None:
         super().configure(setting)
         self.vcl_helper = VclHelper(
             self.actor, self.critic1, self.critic2, self.algo_config.regularize_critic
         )
 
-    def handle_task_boundary(self, old_task: int, new_task: int, training: bool) -> None:
-        # NOTE: Moved this to the subclasses.
-        if training and new_task > 0:
+    def get_auxiliary_loss(self, seq_idx: int) -> Tuple[tf.Tensor, tf.Tensor]:
+        aux_pi_loss, aux_value_loss = super().get_auxiliary_loss(seq_idx=seq_idx)
+
+        reg_loss = self.vcl_helper.regularize(
+            seq_idx, regularize_last_layer=self.algo_config.vcl_first_task_kl
+        )
+        reg_loss_coef = (
+            self.algo_config.cl_reg_coef
+            if seq_idx > 0 or self.algo_config.vcl_first_task_kl
+            else 0.0
+        )
+        # reg_loss_coef = tf.cond(
+        #     seq_idx > 0 or self.algo_config.vcl_first_task_kl,
+        #     lambda: self.algo_config.cl_reg_coef,
+        #     lambda: 0.0,
+        # )
+        reg_loss *= reg_loss_coef
+        aux_pi_loss += reg_loss
+        return aux_pi_loss, aux_value_loss
+
+    def handle_task_boundary(self, task_id: int, training: bool) -> None:
+        super().handle_task_boundary(task_id=task_id, training=training)
+        if training and task_id > 0:
             self.vcl_helper.update_prior()
-        super().handle_task_boundary(old_task=old_task, new_task=new_task, training=training)

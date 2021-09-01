@@ -6,7 +6,7 @@ from continual_world.methods.packnet import PackNetHelper
 from continual_world.utils.utils import reset_optimizer
 from sequoia.settings.rl.discrete.setting import DiscreteTaskAgnosticRLSetting
 import tensorflow as tf
-
+import tqdm
 from .base_sac_method import GradientsTuple, SACMethod
 
 
@@ -42,7 +42,9 @@ class PackNet(SACMethod):
 
         actor_gradients, critic_gradients, alpha_gradient = gradients
         actor_gradients = self.packnet_helper.adjust_gradients(
-            actor_gradients, self.actor.trainable_variables, tf.convert_to_tensor(seq_idx)
+            actor_gradients,
+            self.actor.trainable_variables,
+            tf.convert_to_tensor(seq_idx),
         )
         if self.algo_config.regularize_critic:
             critic_gradients = self.packnet_helper.adjust_gradients(
@@ -51,25 +53,34 @@ class PackNet(SACMethod):
         gradients = GradientsTuple(actor_gradients, critic_gradients, alpha_gradient)
         return gradients, metrics
 
+    def on_test_episode_start(self, seq_idx: int, episode: int) -> None:
+        super().on_test_episode_start(seq_idx=seq_idx, episode=episode)
+        self.packnet_helper.set_view(seq_idx)
+
+    def on_test_loop_end(self) -> None:
+        super().on_test_loop_end()
+        self.packnet_helper.set_view(-1)
+
     def on_task_switch(self, task_id: Optional[int]):
         super().on_task_switch(task_id)
-    
-    def handle_task_boundary(self, old_task: int, new_task: int, training: bool) -> None:
+
+    def handle_task_boundary(
+        self, old_task: int, new_task: int, training: bool
+    ) -> None:
         # NOTE: This block was adapted from the main loop in 'fit', so should it include the logic
         # from the original 'task switch'? (Resetting the optimizer etc)?
-        if training and new_task < self.num_tasks - 1:
+        # NOTE: Don't do anything at the start task 0 (go to the 'else' part).
+        if training and 1 <= new_task < self.num_tasks - 1:
             # self.algo_config.cl_method == "packnet"
             # and (current_task_t + 1 == steps_per_task)
             # and self.current_task_idx < self.num_tasks - 1
-        # ):
-            if new_task == 0:
+            # ):
+            if new_task == 1:
                 self.packnet_helper.set_freeze_biases_and_normalization(True)
 
             # Each task gets equal share of 'kernel' weights.
             if self.algo_config.packnet_fake_num_tasks is not None:
-                num_tasks_left = (
-                    self.algo_config.packnet_fake_num_tasks - new_task - 1
-                )
+                num_tasks_left = self.algo_config.packnet_fake_num_tasks - new_task - 1
             else:
                 num_tasks_left = self.num_tasks - new_task - 1
                 # num_tasks_left = env.num_envs - self.current_task_idx - 1
@@ -78,9 +89,13 @@ class PackNet(SACMethod):
 
             reset_optimizer(self.optimizer)
 
-            for _ in range(self.algo_config.packnet_retrain_steps):
+            for _ in tqdm.tqdm(
+                range(self.algo_config.packnet_retrain_steps), desc="finetuning"
+            ):
                 batch = self.replay_buffer.sample_batch(self.algo_config.batch_size)
                 self.learn_on_batch(tf.convert_to_tensor(self.current_task_idx), batch)
 
             reset_optimizer(self.optimizer)
-        super().handle_task_boundary(old_task=old_task, new_task=new_task, training=training)
+        super().handle_task_boundary(
+            old_task=old_task, new_task=new_task, training=training
+        )

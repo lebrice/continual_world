@@ -1,5 +1,5 @@
 from copy import deepcopy
-from typing import List, Optional, Sequence, Union
+from typing import List, Optional, Sequence, Type, Union
 from functools import lru_cache
 import gym
 import metaworld
@@ -242,11 +242,13 @@ def get_mt_env(
     div_by_return: bool=False,
     randomization: str="deterministic",
 ):
+    MT50 = get_mt50()
     task_names = [get_task_name(task) for task in tasks]
     num_tasks = len(task_names)
     envs = []
     for i, task_name in enumerate(task_names):
-        env = MT50.train_classes[task_name]()
+        env_class: Type[gym.Env] = MT50.train_classes[task_name]
+        env = env_class()
         env = RandomizationWrapper(env, get_subtasks(task_name), randomization)
         env = OneHotAdder(env, one_hot_idx=i, one_hot_len=num_tasks)
         env.name = task_name

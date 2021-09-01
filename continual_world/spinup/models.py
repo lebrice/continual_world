@@ -83,7 +83,9 @@ class Actor(Model, ABC):
         self.hide_task_id = hide_task_id
 
         if self.hide_task_id:
-            self.input_dim = MW_OBS_LEN
+            pass
+            # assert False, self.input_dim
+            # self.input_dim = MW_OBS_LEN
 
     @abstractmethod
     def call(self, x: tf.Tensor) -> ActorOutput:
@@ -167,19 +169,22 @@ class MlpActor(Actor):
 class MlpCritic(Model):
     def __init__(
         self,
-        input_dim,
-        hidden_sizes=(256, 256),
-        activation=tf.tanh,
-        use_layer_norm=False,
-        num_heads=1,
-        hide_task_id=False,
+        input_dim: int,
+        hidden_sizes: Tuple[int, ...] = (256, 256),
+        activation: Callable[[tf.Tensor], tf.Tensor] = tf.tanh,
+        use_layer_norm: bool = False,
+        num_heads: int = 1,
+        hide_task_id: bool = False,
     ):
-        super(MlpCritic, self).__init__()
+        super().__init__()
         self.hide_task_id = hide_task_id
         self.num_heads = num_heads
-
+        self.input_dim = input_dim
         if self.hide_task_id:
-            input_dim = MW_OBS_LEN + MW_ACT_LEN
+            # NOTE: If /self.hide_task_id is True, then the env won't add the task ids anyway.
+            pass
+            # input_dim = MW_OBS_LEN + MW_ACT_LEN
+        
         self.core = mlp(input_dim, hidden_sizes, activation, use_layer_norm=use_layer_norm)
         self.head = tf.keras.Sequential(
             [Input(shape=(hidden_sizes[-1],)), tf.keras.layers.Dense(num_heads)]
@@ -208,7 +213,7 @@ class PopArtMlpCritic(MlpCritic):
     # in multi-task learning. For reference, see https://arxiv.org/abs/1602.07714
     # and https://arxiv.org/abs/1809.04474v1
     def __init__(self, **kwargs):
-        super(PopArtMlpCritic, self).__init__(**kwargs)
+        super().__init__(**kwargs)
 
         self.moment1 = tf.Variable(tf.zeros((self.num_heads, 1)), trainable=False)
         self.moment2 = tf.Variable(tf.ones((self.num_heads, 1)), trainable=False)

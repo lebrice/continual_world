@@ -23,14 +23,23 @@ class AGEM(SACMethod):
         )
         self.agem_helper = AgemHelper()
 
-    def handle_task_boundary(self, old_task: int, new_task: int, training: bool) -> None:
+    def handle_task_boundary(self, task_id: int, training: bool) -> None:
+        super().handle_task_boundary(task_id=task_id, training=training)
         # NOTE: Moved this to the subclasses.
-        if self.current_task_idx > 0:
+        assert self.current_task_idx == task_id
+        if task_id > 0:
             new_episodic_mem = self.replay_buffer.sample_batch(
                 self.algo_config.episodic_mem_per_task
             )
             self.episodic_memory.store_multiple(**new_episodic_mem)
-        super().handle_task_boundary(old_task=old_task, new_task=new_task, training=training)
+
+    def sample_batches(self) -> Tuple[BatchDict, BatchDict]:
+        batch, episodic_batch = super().sample_batches()
+        if self.current_task_idx > 0:
+            episodic_batch = self.episodic_memory.sample_batch(
+                self.algo_config.episodic_batch_size
+            )
+        return batch, episodic_batch
 
     def get_gradients(
         self,
@@ -40,16 +49,25 @@ class AGEM(SACMethod):
         acts: tf.Tensor,
         rews: tf.Tensor,
         done: bool,
-        episodic_batch: BatchDict=None,
-    ) -> Tuple[List[tf.Tensor], Dict]:
+        episodic_batch: BatchDict = None,
+    ) -> Tuple[GradientsTuple, Dict]:
         gradients, metrics = super().get_gradients(
-            seq_idx, obs1=obs1, obs2=obs2, acts=acts, rews=rews, done=done
+            seq_idx,
+            obs1=obs1,
+            obs2=obs2,
+            acts=acts,
+            rews=rews,
+            done=done,
+            episodic_batch=None,
         )
+
         # Warning: we refer here to the int task_idx in the parent function, not
         # the passed seq_idx.
         if self.current_task_idx > 0:
             if not episodic_batch:
-                raise RuntimeError(f"Need to pass episodic_batch to `get_gradients` for AGEM.")
+                raise RuntimeError(
+                    f"Need to pass episodic_batch to `get_gradients` for AGEM. ({self.current_task_idx}, {self.training})"
+                )
 
             ref_gradients, _ = super().get_gradients(
                 seq_idx,
@@ -59,6 +77,9 @@ class AGEM(SACMethod):
                 rews=episodic_batch["rews"],
                 done=episodic_batch["done"],
             )
-            gradients, violation = self.agem_helper.adjust_gradients(gradients, ref_gradients)
+            gradients, violation = self.agem_helper.adjust_gradients(
+                gradients, ref_gradients
+            )
             metrics["agem_violation"] = violation
+
         return gradients, metrics
