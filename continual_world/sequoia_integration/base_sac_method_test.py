@@ -1,13 +1,12 @@
 from typing import ClassVar, Dict, Type
 import pytest
 from sequoia.common.config import Config
-from sequoia.methods import random_baseline
 from sequoia.methods.method_test import MethodTests, MethodType
 from sequoia.settings.rl import RLSetting
 from sequoia.settings.rl.incremental.setting import IncrementalRLSetting
-from .base_sac_method import SACMethod
-from sequoia.common.metrics import EpisodeMetrics
 from sequoia.methods.random_baseline import RandomBaselineMethod
+
+from .base_sac_method import SACMethod
 
 
 class TestSACMethod(MethodTests):

@@ -7,7 +7,7 @@ import tensorflow.keras as tfk
 from tensorflow.keras import Input, Model
 from tensorflow.python.ops import nn
 
-from continual_world.envs import MW_OBS_LEN, MW_ACT_LEN
+# from continual_world.envs import MW_OBS_LEN, MW_ACT_LEN
 from continual_world.spinup.models import apply_squashing_func, gaussian_likelihood, _choose_head
 
 EPS = 1e-8
@@ -168,7 +168,10 @@ class VclMlpActor(Actor):
         self.hide_task_id = hide_task_id
 
         if self.hide_task_id:
-            input_dim = MW_OBS_LEN
+            # NOTE: This is different, we're just not going to add the task labels if we were going
+            # to remove them anyway.
+            pass
+            # input_dim = MW_OBS_LEN
 
         self.core = variational_mlp(
             input_dim,
@@ -200,11 +203,12 @@ class VclMlpActor(Actor):
             + self.head_log_std.trainable_variables
         )
 
-    def call(self, x, samples_num=1):
+    def call(self, x: tf.Tensor, samples_num: int=1) -> ActorOutput:
         input_x = x
         full_obs = x
         if self.hide_task_id:
-            input_x = input_x[:, :MW_OBS_LEN]
+            input_x = input_x[:, :self.input_dim]
+            # input_x = input_x[:, :MW_OBS_LEN]
         mus, pis = [], []
 
         for sample_idx in range(samples_num):
@@ -234,7 +238,7 @@ class VclMlpActor(Actor):
         mu = tf.reduce_mean(tf.stack(mus), 0)
         pi = tf.reduce_mean(tf.stack(pis), 0)
 
-        return mu, log_std, pi, logp_pi
+        return ActorOutput(mu=mu, log_std=log_std, pi=pi, logp_pi=logp_pi)
 
 
 def kl_divergence(posterior_mean, posterior_logvar, prior_mean, prior_logvar):

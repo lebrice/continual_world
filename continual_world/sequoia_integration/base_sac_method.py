@@ -1,3 +1,12 @@
+""" SAC "Method", used as the base for the other methods which extend it.
+
+This code is based on [sac.py](https://github.com/awarelab/continual_world/blob/main/spinup/sac.py),
+where the large `sac` function is instead implemented as a class where the different sub-functions
+become methods.
+
+IDEA: Could also perhaps create these `Method` classes inside `continual_world/methods`, and then
+later add the necessary wrapping around them so that they can be used by Sequoia.
+"""
 import itertools
 import logging
 import math
@@ -7,32 +16,24 @@ import time
 from argparse import Namespace
 from collections import defaultdict
 from dataclasses import asdict, dataclass
-from typing import Any, ClassVar, Dict, List, NamedTuple, Optional, Tuple, Type, Union
+from typing import Any, ClassVar, Dict, List, Optional, Tuple, Type, Union
 
 import gym
 import numpy as np
 import tensorflow as tf
-from continual_world.config import TaskConfig
-from continual_world.methods.vcl import VclHelper, VclMlpActor
-from continual_world.sequoia_integration.wrappers import (
-    SequoiaToCWWrapper,
-    concat_x_and_t,
-    wrap_sequoia_env,
-)
+
 from continual_world.spinup.models import Actor, MlpActor, MlpCritic, PopArtMlpCritic
+from continual_world.config import TaskConfig
 from continual_world.spinup.replay_buffers import (
-    EpisodicMemory,
     ReplayBuffer,
     ReservoirReplayBuffer,
 )
 from continual_world.spinup.utils.logx import EpochLogger
-from continual_world.task_lists import task_seq_to_task_list
 from continual_world.utils.utils import (
     get_activation_from_str,
     reset_optimizer,
     reset_weights,
     sci2int,
-    str2bool,
 )
 from gym import spaces
 from sequoia.common.spaces.typed_dict import TypedDictSpace
@@ -44,33 +45,19 @@ from sequoia.settings.rl.setting import RLSetting
 from simple_parsing import ArgumentParser
 from simple_parsing.helpers import choice, field, list_field
 from simple_parsing.helpers.hparams.hyperparameters import HyperParameters
-from simple_parsing.helpers.serialization.serializable import Serializable
-from tensorflow.python.types.core import Value
+from continual_world.spinup.objects import BatchDict, GradientsTuple
 from tqdm import tqdm
 
-try:
-    from typing import TypedDict
-except ImportError:
-    from typing_extensions import TypedDict
+from .wrappers import (
+    SequoiaToCWWrapper,
+    concat_x_and_t,
+    wrap_sequoia_env,
+)
+
 
 # weights_reg_methods = ["l2", "ewc", "mas"]
 # exp_replay_methods = ["agem"]
 logger = logging.getLogger(__name__)
-
-
-class BatchDict(TypedDict):
-    obs1: tf.Tensor
-    obs2: tf.Tensor
-    acts: tf.Tensor
-    rews: tf.Tensor
-    done: bool
-
-
-class GradientsTuple(NamedTuple):
-    actor_gradients: List[tf.Tensor]
-    critic_gradients: List[tf.Tensor]
-    alpha_gradient: List[tf.Tensor]
-
 
 # TODO: switch this to the `DiscreteTaskAgnosticRLSetting` if/when we add support for passing the
 # envs of each task to that setting.
@@ -82,14 +69,6 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
     @dataclass
     class Config(HyperParameters):
         """ Configuration options for the Algorithm. """
-
-        # Which CL method to use.
-        # NOTE: This has been converted into what is essentially an 'Abstract' property that is
-        # fixed by the different subclasses.
-        # cl_method: Optional[str] = choice(  # type: ignore
-        #     None, "l2", "ewc", "mas", "vcl", "packnet", "agem", default=None
-        # )
-
         # Wether to clear the replay buffer when a task boundary is reached during training.
         reset_buffer_on_task_change: bool = True
         # Wether to reset the optimzier when a task boundary is reached during training.
@@ -409,7 +388,7 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
                 # NOTE: @lebrice: Interesting: Perform one update per step, even when `update_every`
                 # is an interval, i.e. "perform 50 updates every 50 steps".
 
-                for j in range(self.algo_config.update_every):
+                for update_step in range(self.algo_config.update_every):
                     batch, episodic_batch = self.sample_batches()
                     results = self.learn_on_batch(
                         tf.convert_to_tensor(self.current_task_idx),
@@ -481,6 +460,7 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
                 # Test the performance of the deterministic version of the agent.
                 self.test_agent(test_envs)
 
+                # TODO: Use wandb instead.
                 # Log info about epoch
                 self.logger.log_tabular("epoch", epoch)
                 self.logger.log_tabular("train/return", with_min_and_max=True)

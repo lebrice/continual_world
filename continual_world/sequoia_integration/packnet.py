@@ -1,16 +1,21 @@
+import warnings
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 
-from continual_world.config import AlgoConfig
-from continual_world.methods.packnet import PackNetHelper
-from continual_world.utils.utils import reset_optimizer
-from sequoia.settings.rl.discrete.setting import DiscreteTaskAgnosticRLSetting
 import tensorflow as tf
 import tqdm
+from continual_world.config import AlgoConfig
+from continual_world.methods.packnet import PackNetHelper
+from continual_world.spinup.objects import BatchDict
+from continual_world.utils.utils import reset_optimizer
+from sequoia.settings.rl import TaskIncrementalRLSetting
+
 from .base_sac_method import GradientsTuple, SACMethod
 
 
-class PackNet(SACMethod):
+class PackNet(SACMethod, target_setting=TaskIncrementalRLSetting):
+    # NOTE: This PackNet method requires task labels for now.
+
     @dataclass
     class Config(SACMethod.Config):
         packnet_retrain_steps: int = 1000  # TODO: Double-check the value here.
@@ -20,7 +25,7 @@ class PackNet(SACMethod):
         self.algo_config: AlgoConfig
         self.packnet_helper: PackNetHelper
 
-    def configure(self, setting: DiscreteTaskAgnosticRLSetting) -> None:
+    def configure(self, setting: TaskIncrementalRLSetting) -> None:
         super().configure(setting)
         packnet_models = [self.actor]
         if self.algo_config.regularize_critic:
@@ -35,16 +40,21 @@ class PackNet(SACMethod):
         acts: tf.Tensor,
         rews: tf.Tensor,
         done: bool,
+        episodic_batch: BatchDict = None,
     ) -> Tuple[GradientsTuple, Dict]:
         gradients, metrics = super().get_gradients(
-            seq_idx, obs1=obs1, obs2=obs2, acts=acts, rews=rews, done=done
+            seq_idx,
+            obs1=obs1,
+            obs2=obs2,
+            acts=acts,
+            rews=rews,
+            done=done,
+            episodic_batch=episodic_batch,
         )
 
         actor_gradients, critic_gradients, alpha_gradient = gradients
         actor_gradients = self.packnet_helper.adjust_gradients(
-            actor_gradients,
-            self.actor.trainable_variables,
-            tf.convert_to_tensor(seq_idx),
+            actor_gradients, self.actor.trainable_variables, tf.convert_to_tensor(seq_idx),
         )
         if self.algo_config.regularize_critic:
             critic_gradients = self.packnet_helper.adjust_gradients(
@@ -64,38 +74,41 @@ class PackNet(SACMethod):
     def on_task_switch(self, task_id: Optional[int]):
         super().on_task_switch(task_id)
 
-    def handle_task_boundary(
-        self, old_task: int, new_task: int, training: bool
-    ) -> None:
-        # NOTE: This block was adapted from the main loop in 'fit', so should it include the logic
-        # from the original 'task switch'? (Resetting the optimizer etc)?
-        # NOTE: Don't do anything at the start task 0 (go to the 'else' part).
-        if training and 1 <= new_task < self.num_tasks - 1:
-            # self.algo_config.cl_method == "packnet"
-            # and (current_task_t + 1 == steps_per_task)
-            # and self.current_task_idx < self.num_tasks - 1
-            # ):
-            if new_task == 1:
+    def handle_task_boundary(self, task_id: int, training: bool) -> None:
+        # NOTE: The base class doesn't currently do anything in this method, so it's safe to run it
+        # before. However, if this were to be used in conjunction with another method, then things
+        # could get a bit complicated: We'd have to figure out if this packnet stuff needs to go
+        # before or after it.
+        super().handle_task_boundary(task_id=task_id, training=training)
+        # NOTE: Don't do anything at the start of training (when `task_id` == 0).
+        # TODO: How should we handle a `task_id` value of `-1`? Should we just pretend it's a new
+        # task? For now we don't handle it.
+        if task_id == -1:
+            warnings.warn(
+                RuntimeWarning(
+                    f"Unable to use PackNet effectively, since the task labels weren't given!"
+                )
+            )
+
+        if training and 0 <= task_id < self.num_tasks - 1:
+            if task_id == 0:
+                return
+            if task_id == 1:
                 self.packnet_helper.set_freeze_biases_and_normalization(True)
 
             # Each task gets equal share of 'kernel' weights.
             if self.algo_config.packnet_fake_num_tasks is not None:
-                num_tasks_left = self.algo_config.packnet_fake_num_tasks - new_task - 1
+                num_tasks_left = self.algo_config.packnet_fake_num_tasks - task_id - 1
             else:
-                num_tasks_left = self.num_tasks - new_task - 1
+                num_tasks_left = self.num_tasks - task_id - 1
                 # num_tasks_left = env.num_envs - self.current_task_idx - 1
             prune_perc = num_tasks_left / (num_tasks_left + 1)
             self.packnet_helper.prune(prune_perc, self.current_task_idx)
 
             reset_optimizer(self.optimizer)
 
-            for _ in tqdm.tqdm(
-                range(self.algo_config.packnet_retrain_steps), desc="finetuning"
-            ):
+            for _ in tqdm.tqdm(range(self.algo_config.packnet_retrain_steps), desc="finetuning"):
                 batch = self.replay_buffer.sample_batch(self.algo_config.batch_size)
                 self.learn_on_batch(tf.convert_to_tensor(self.current_task_idx), batch)
 
             reset_optimizer(self.optimizer)
-        super().handle_task_boundary(
-            old_task=old_task, new_task=new_task, training=training
-        )

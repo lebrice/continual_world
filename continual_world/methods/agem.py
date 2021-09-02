@@ -1,5 +1,5 @@
 from typing import Tuple
-from continual_world.sequoia_integration.base_sac_method import GradientsTuple
+from continual_world.spinup.objects import GradientsTuple
 import tensorflow as tf
 
 
