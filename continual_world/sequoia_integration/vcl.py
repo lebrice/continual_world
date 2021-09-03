@@ -9,12 +9,12 @@ from continual_world.methods.vcl import VclHelper, VclMlpActor
 from sequoia.settings.rl.discrete.setting import DiscreteTaskAgnosticRLSetting
 
 
-from .base_sac_method import SACMethod
+from .base_sac_method import SAC
 
 
-class VCL(SACMethod):
+class VCL(SAC):
     @dataclass
-    class Config(SACMethod.Config):
+    class Config(SAC.Config):
         vcl_first_task_kl: bool = True
         vcl_variational_ln: bool = False
 

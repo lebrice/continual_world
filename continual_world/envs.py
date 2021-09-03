@@ -32,11 +32,12 @@ MT50_TASK_NAMES_CACHE_PATH = Path("MT50_task_names.txt")
 
 def get_mt50_task_names() -> List[str]:
     if MT50_TASK_NAMES_CACHE_PATH.exists():
-        mt50_task_names = MT50_TASK_NAMES_CACHE_PATH.read_text().splitlines()
-    else:
-        mt50_task_names = list(get_mt50().train_classes)
-        with MT50_TASK_NAMES_CACHE_PATH.open("w") as f:
-            f.writelines(mt50_task_names)
+        return [
+            line for line in MT50_TASK_NAMES_CACHE_PATH.read_text().splitlines() if not line.isspace()
+        ]
+    mt50_task_names = list(get_mt50().train_classes)
+    with MT50_TASK_NAMES_CACHE_PATH.open("w") as f:
+        f.write("\n".join(mt50_task_names))
     return mt50_task_names
 
 # MT50 = get_mt50()
@@ -47,7 +48,7 @@ MW_ACT_LEN = 4
 
 
 def get_task_name(name_or_number: Union[str, int]) -> str:
-    mt50_task_names = get_mt50_task_names() 
+    mt50_task_names = get_mt50_task_names()
     if isinstance(name_or_number, int):
         return mt50_task_names[name_or_number]
     if name_or_number not in mt50_task_names:
@@ -162,11 +163,13 @@ def get_cl_env(
     div_by_return=False,
     randomization="deterministic",
 ):
+    MT50 = get_mt50()
     task_names = [get_task_name(task) for task in tasks]
     num_tasks = len(task_names)
     envs = []
     for i, task_name in enumerate(task_names):
-        env = MT50.train_classes[task_name]()
+        env_class: Type[gym.Env] = MT50.train_classes[task_name]
+        env = env_class()
         env = RandomizationWrapper(env, get_subtasks(task_name), randomization)
         env = OneHotAdder(env, one_hot_idx=i, one_hot_len=num_tasks)
         env.name = task_name

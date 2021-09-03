@@ -17,6 +17,7 @@ from argparse import Namespace
 from collections import defaultdict
 from dataclasses import asdict, dataclass
 from typing import Any, ClassVar, Dict, List, Optional, Tuple, Type, Union
+import warnings
 
 import gym
 import numpy as np
@@ -63,7 +64,7 @@ logger = logging.getLogger(__name__)
 # envs of each task to that setting.
 
 
-class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
+class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
     family: ClassVar[str] = "continual_world"
 
     @dataclass
@@ -79,6 +80,8 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
         # scale_reward: bool = False
         # div_by_return: bool = False
         lr: float = 1e-3
+        # Entropy regularization coefficient.
+        # (Equivalent to inverse of reward scale in the original SAC paper.)
         alpha: str = "auto"
         use_popart: bool = False
         regularize_critic: bool = False
@@ -134,7 +137,7 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
         # How often (in terms of gap between epochs) to save the current policy and value function.
         save_freq_epochs: int = 100
 
-    def __init__(self, algo_config: "SACMethod.Config" = None):
+    def __init__(self, algo_config: "SAC.Config" = None):
         super().__init__()
         self.algo_config = algo_config or self.Config()
         # NOTE: These attributes are set in self.configure. This is just here for type hints.
@@ -214,6 +217,17 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
         self.add_task_ids = (
             setting.task_labels_at_train_time and setting.task_labels_at_test_time
         )
+        
+        # TODO: Should we set num_heads to the number of tasks if we don't have task labels? If so,
+        # we'd need
+        if self.algo_config.multihead_archs and not self.add_task_ids:
+            warnings.warn(RuntimeWarning(
+                "Disabling the multi-head architecture for now, since the setting doesn't give "
+                "task labels at train and test time, and there isn't yet some form of "
+                "task-inference in this repo."
+            ))
+            self.algo_config.multihead_archs = False
+
         self.obs_dim = np.prod(setting.observation_space.x.shape)
         if setting.task_labels_at_train_time and setting.task_labels_at_test_time:
             # The task ids will be concatenated to the observations.
@@ -255,7 +269,14 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
         # "Automating Entropy Adjustment for Maximum Entropy" section
         # in https://arxiv.org/abs/1812.05905
         self.auto_alpha = False
-        if self.algo_config.alpha == "auto":
+        # TODO: Need to figure out how to handle this `log_alpha` term when we don't have task labels.
+        if not self.add_task_ids:
+            self.auto_alpha = False
+            if isinstance(self.algo_config.alpha, str):
+                # TODO: Putting a random value here, no idea what this is.
+                self.algo_config.alpha = 0.1
+
+        elif self.algo_config.alpha == "auto":
             self.auto_alpha = True
             self.all_log_alpha = tf.Variable(
                 np.ones((self.num_tasks, 1), dtype=np.float32), trainable=True
@@ -269,31 +290,6 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
                     self.algo_config.target_output_std * math.sqrt(2 * math.pi * math.e)
                 )
                 self.target_entropy = self.act_dim * target_1d_entropy
-
-        # TODO: Split these off into different methods based on the value of `cl_method`.
-        # cl_method = self.algo_config.cl_method
-        # Setup CL methods: Moved to the subclasses.
-        # if cl_method == "packnet":
-        #     packnet_models = [self.actor]
-        #     if self.algo_config.regularize_critic:
-        #         packnet_models.extend([self.critic1, self.critic2])
-        #     self.packnet_helper = PackNetHelper(packnet_models)
-        # elif cl_method in weights_reg_methods:
-        #     self.old_params = list(
-        #         tf.Variable(tf.identity(param), trainable=False)
-        #         for param in self.all_common_variables
-        #     )
-        #     self.reg_helper = self.get_reg_helper()
-        # if cl_method == "vcl":
-        #     self.vcl_helper = VclHelper(
-        #         self.actor, self.critic1, self.critic2, self.algo_config.regularize_critic
-        #     )
-        # if cl_method == "agem":
-        #     episodic_mem_size = self.algo_config.episodic_mem_per_task * self.num_tasks
-        #     self.episodic_memory = EpisodicMemory(
-        #         obs_dim=self.obs_dim, act_dim=self.act_dim, size=episodic_mem_size
-        #     )
-        #     self.agem_helper = AgemHelper()
 
     def fit(self, train_env: gym.Env, valid_env: gym.Env,) -> None:
         """Train and validate using the environments created by the Setting.
@@ -597,7 +593,7 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
             return action_space.dtype(**action_np)
         return action_np
 
-    @tf.function
+    # @tf.function
     def learn_on_batch(
         self, seq_idx: int, batch: BatchDict, episodic_batch: BatchDict = None
     ) -> Dict:
@@ -621,13 +617,16 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
         return self.learn_on_batch
         # return learn_on_batch
 
-    @tf.function
-    def get_log_alpha(self, obs1):
+    # @tf.function
+    def get_log_alpha(self, obs):
+        # TODO: This seems to use the task labels, right? What if we don't have access to them?
+        # NOTE: all_log_alpha is initialized to `np.ones((self.num_tasks, 1)`
+        task_ids = obs[:, -self.num_tasks :]
         return tf.squeeze(
-            tf.linalg.matmul(obs1[:, -self.num_tasks :], self.all_log_alpha)
+            tf.linalg.matmul(task_ids, self.all_log_alpha)
         )
 
-    @tf.function
+    # @tf.function
     def get_action(self, o, deterministic=tf.constant(False)) -> tf.Tensor:
         # if self.algo_config.cl_method == "vcl":
         #     # Disable multiple samples in VCL for faster evaluation
@@ -640,7 +639,7 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
         else:
             return pi[0]
 
-    @tf.function
+    # @tf.function
     def vcl_get_stable_action(self, o, deterministic=tf.constant(False)) -> tf.Tensor:
         mu, log_std, pi, logp_pi = self.actor(tf.expand_dims(o, 0), samples_num=10)
         if deterministic:
@@ -970,7 +969,7 @@ class SACMethod(Method, target_setting=IncrementalRLSetting):  # type: ignore
     @classmethod
     def from_argparse_args(cls, args: Namespace, dest: str = ""):
         args = getattr(args, dest) if dest else args
-        algo_config: SACMethod.Config = getattr(args, "algo_config")
+        algo_config: SAC.Config = getattr(args, "algo_config")
         return cls(algo_config=algo_config)
 
     @classmethod
@@ -992,8 +991,8 @@ def main():
     from sequoia.common.config import Config
     from sequoia.settings.rl import IncrementalRLSetting, TraditionalRLSetting
 
-    algo_config = SACMethod.Config(start_steps=50)
-    method = SACMethod(algo_config=algo_config)
+    algo_config = SAC.Config(start_steps=50)
+    method = SAC(algo_config=algo_config)
     setting = TraditionalRLSetting(
         dataset="MountainCarContinuous-v0",
         nb_tasks=1,

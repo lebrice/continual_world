@@ -6,12 +6,12 @@ from continual_world.methods.agem import AgemHelper
 from continual_world.spinup.replay_buffers import EpisodicMemory
 from sequoia.settings.rl.discrete.setting import DiscreteTaskAgnosticRLSetting
 
-from .base_sac_method import SACMethod, GradientsTuple, BatchDict
+from .base_sac_method import SAC, GradientsTuple, BatchDict
 
 
-class AGEM(SACMethod):
+class AGEM(SAC):
     @dataclass
-    class Config(SACMethod.Config):
+    class Config(SAC.Config):
         episodic_mem_per_task: int = 0
         episodic_batch_size: int = 0
 

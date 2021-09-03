@@ -118,6 +118,8 @@ class Logger:
           self.tb_writer = tf.summary.create_file_writer(self.output_dir)
           self.tb_writer.set_as_default()
 
+        # TODO: Add Wandb maybe?
+
         self.save_config(config)
 
 

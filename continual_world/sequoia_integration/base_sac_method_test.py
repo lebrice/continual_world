@@ -6,11 +6,11 @@ from sequoia.settings.rl import RLSetting
 from sequoia.settings.rl.incremental.setting import IncrementalRLSetting
 from sequoia.methods.random_baseline import RandomBaselineMethod
 
-from .base_sac_method import SACMethod
+from .base_sac_method import SAC
 
 
 class TestSACMethod(MethodTests):
-    Method: ClassVar[Type[SACMethod]] = SACMethod
+    Method: ClassVar[Type[SAC]] = SAC
     setting_kwargs: ClassVar[Dict[str, str]] = {"dataset": "MountainCarContinuous-v0"}
 
     def test_configure_sets_values_properly(self, config: Config):

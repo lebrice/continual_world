@@ -4,6 +4,7 @@ import tensorflow as tf
 
 from tensorflow.keras import Input, Model
 from continual_world.envs import MW_ACT_LEN, MW_OBS_LEN
+import warnings
 
 EPS = 1e-8
 
@@ -44,11 +45,24 @@ def mlp(input_dim, hidden_sizes, activation, use_layer_norm=False):
     return model
 
 
-def _choose_head(out, obs, num_heads):
+def _choose_head(out: tf.Tensor, obs: tf.Tensor, num_heads: int):
     batch_size = tf.shape(out)[0]
     out = tf.reshape(out, [batch_size, -1, num_heads])
-    obs = tf.reshape(obs[:, -num_heads:], [batch_size, num_heads, 1])
-    return tf.squeeze(out @ obs, axis=2)
+
+    # NOTE: This next line assumed that the obs has task labels, but that isn't always the case!
+    # obs = tf.reshape(obs[:, -num_heads:], [batch_size, num_heads, 1])
+
+    output_head_coefficients: tf.Tensor
+    if obs.shape[1] > num_heads:
+        # If the shape[1] is greater than num_heads, that means the task labels are present.
+        task_labels_onehot = obs[:, -num_heads:]
+        output_head_coefficients = tf.reshape(task_labels_onehot, [batch_size, num_heads, 1])
+    else:
+        # raise RuntimeError(f"Can't choose heads without having access to the task labels!")
+        # TODO: IDEA: (@lebrice) How about we use all the heads then, with a coefficient per head?
+        warnings.warn(RuntimeWarning("Using all the output heads since we don't have task labels."))
+        output_head_coefficients = tf.ones([batch_size, num_heads, 1]) / num_heads
+    return tf.squeeze(out @ output_head_coefficients, axis=2)
 
 
 from abc import ABC, abstractmethod

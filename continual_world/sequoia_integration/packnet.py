@@ -10,14 +10,14 @@ from continual_world.spinup.objects import BatchDict
 from continual_world.utils.utils import reset_optimizer
 from sequoia.settings.rl import TaskIncrementalRLSetting
 
-from .base_sac_method import GradientsTuple, SACMethod
+from .base_sac_method import GradientsTuple, SAC
 
 
-class PackNet(SACMethod, target_setting=TaskIncrementalRLSetting):
+class PackNet(SAC, target_setting=TaskIncrementalRLSetting):
     # NOTE: This PackNet method requires task labels for now.
 
     @dataclass
-    class Config(SACMethod.Config):
+    class Config(SAC.Config):
         packnet_retrain_steps: int = 1000  # TODO: Double-check the value here.
 
     def __init__(self, algo_config: "PackNet.Config"):

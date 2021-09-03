@@ -13,12 +13,12 @@ from continual_world.methods.vcl import VclMlpActor
 from sequoia.settings.rl.discrete.setting import DiscreteTaskAgnosticRLSetting
 from sequoia.settings.rl.setting import RLSetting
 
-from .base_sac_method import SACMethod
+from .base_sac_method import SAC
 
 
-class RegMethod(SACMethod, ABC):
+class RegMethod(SAC, ABC):
     @dataclass
-    class Config(SACMethod.Config):
+    class Config(SAC.Config):
         """ Hyper-Parameters of a regularization method for CRL. """
 
         cl_reg_coef: float = 0.0
@@ -61,14 +61,14 @@ class RegMethod(SACMethod, ABC):
             self.reg_helper.update_reg_weights(self.replay_buffer)
 
 
-class L2RegMethod(RegMethod):
+class L2Regularization(RegMethod):
     @dataclass
     class Config(RegMethod.Config):
         pass
 
-    def __init__(self, algo_config: "L2RegMethod.Config"):
+    def __init__(self, algo_config: "L2Regularization.Config"):
         super().__init__(algo_config=algo_config)
-        self.algo_config: L2RegMethod.Config
+        self.algo_config: L2Regularization.Config
         self.reg_helper: L2Helper
 
     def get_reg_helper(self) -> L2Helper:
@@ -77,14 +77,14 @@ class L2RegMethod(RegMethod):
         )
 
 
-class EWCRegMethod(RegMethod):
+class EWC(RegMethod):
     @dataclass
     class Config(RegMethod.Config):
         pass
 
-    def __init__(self, algo_config: "EWCRegMethod.Config"):
+    def __init__(self, algo_config: "EWC.Config"):
         super().__init__(algo_config=algo_config)
-        self.algo_config: EWCRegMethod.Config
+        self.algo_config: EWC.Config
         self.reg_helper: EWCHelper
 
     def get_reg_helper(self) -> EWCHelper:
@@ -97,14 +97,14 @@ class EWCRegMethod(RegMethod):
         )
 
 
-class MASRegMethod(RegMethod):
+class MAS(RegMethod):
     @dataclass
     class Config(RegMethod.Config):
         pass
 
-    def __init__(self, algo_config: "MASRegMethod.Config"):
+    def __init__(self, algo_config: "MAS.Config"):
         super().__init__(algo_config=algo_config)
-        self.algo_config: MASRegMethod.Config
+        self.algo_config: MAS.Config
         self.reg_helper: MASHelper
 
     def get_reg_helper(self) -> MASHelper:
