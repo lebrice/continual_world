@@ -90,9 +90,7 @@ class PackNet(SAC, target_setting=TaskIncrementalRLSetting):
                 )
             )
 
-        if training and 0 <= task_id < self.num_tasks - 1:
-            if task_id == 0:
-                return
+        if training and 1 <= task_id < self.num_tasks - 1:
             if task_id == 1:
                 self.packnet_helper.set_freeze_biases_and_normalization(True)
 

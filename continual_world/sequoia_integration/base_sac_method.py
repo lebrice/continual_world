@@ -45,6 +45,7 @@ from sequoia.settings.rl.incremental.setting import IncrementalRLSetting
 from sequoia.settings.rl.setting import RLSetting
 from simple_parsing import ArgumentParser
 from simple_parsing.helpers import choice, field, list_field
+from simple_parsing.helpers.hparams import categorical
 from simple_parsing.helpers.hparams.hyperparameters import HyperParameters
 from continual_world.spinup.objects import BatchDict, GradientsTuple
 from tqdm import tqdm
@@ -60,16 +61,28 @@ from .wrappers import (
 # exp_replay_methods = ["agem"]
 logger = logging.getLogger(__name__)
 
+
 # TODO: switch this to the `DiscreteTaskAgnosticRLSetting` if/when we add support for passing the
 # envs of each task to that setting.
 
 
 class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
+    
+    # The name for this family of methods.
     family: ClassVar[str] = "continual_world"
 
     @dataclass
     class Config(HyperParameters):
         """ Configuration options for the Algorithm. """
+        # Learning rate
+        lr: float = categorical(3e-5, 1e-4, 3e-4, 1e-3, default=1e-3)
+
+        # Number of samples in each mini-batch sampled by SAC
+        batch_size: int = categorical(128, 256, 512, default=128)
+
+        # Discount factor
+        gamma: float = categorical(0.95, 0.99, 0.995, default=0.99) 
+        
         # Wether to clear the replay buffer when a task boundary is reached during training.
         reset_buffer_on_task_change: bool = True
         # Wether to reset the optimzier when a task boundary is reached during training.
@@ -79,21 +92,19 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
         use_layer_norm: bool = True
         # scale_reward: bool = False
         # div_by_return: bool = False
-        lr: float = 1e-3
         # Entropy regularization coefficient.
         # (Equivalent to inverse of reward scale in the original SAC paper.)
         alpha: str = "auto"
         use_popart: bool = False
         regularize_critic: bool = False
-        cl_reg_coef: float = 0.0
-        episodic_mem_per_task: int = 0
-        episodic_batch_size: int = 0
+
         randomization: str = "random_init_all"
         multihead_archs: bool = True
         hide_task_id: bool = True
         clipnorm: Optional[float] = None
-        gamma: float = 0.99
-        target_output_std: float = 0.089
+
+
+        target_output_std: float = categorical(0.03, 0.089, 0.3, default=0.089)
         packnet_fake_num_tasks: Optional[int] = None
         agent_policy_exploration: bool = False
         critic_reg_coef: float = 1.0
@@ -113,13 +124,11 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
         hidden_sizes: List[int] = list_field(256, 256, 256, 256)
 
         # Size of the replay buffer
-        replay_size: int = field(default=int(1e6), type=sci2int)
+        replay_size: int = field(default=1_000_000, type=sci2int)
 
         # Strategy of inserting examples into the buffer
         buffer_type: str = choice("fifo", "reservoir", default="fifo")  # type: ignore
 
-        # Number of samples in each mini-batch sampled by SAC
-        batch_size: int = 128
 
         # Number of steps for uniform-random action selection, before running real policy. Helps
         # exploration.

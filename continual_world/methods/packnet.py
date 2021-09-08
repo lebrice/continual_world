@@ -1,3 +1,4 @@
+from typing import List
 import tensorflow as tf
 
 
@@ -23,7 +24,7 @@ class PackNetHelper:
     self.freeze_biases_and_normalization = tf.Variable(False, trainable=False)
 
   @tf.function
-  def adjust_gradients(self, grads, variables, seq_idx):
+  def adjust_gradients(self, grads: List[tf.Tensor], variables: List[tf.Tensor], seq_idx: int):
     res = []
     assert len(grads) == len(variables)
     for g, v in zip(grads, variables):

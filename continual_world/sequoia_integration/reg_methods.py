@@ -12,7 +12,7 @@ from continual_world.methods.regularization import (
 from continual_world.methods.vcl import VclMlpActor
 from sequoia.settings.rl.discrete.setting import DiscreteTaskAgnosticRLSetting
 from sequoia.settings.rl.setting import RLSetting
-
+from simple_parsing.helpers.hparams import categorical
 from .base_sac_method import SAC
 
 
@@ -20,8 +20,8 @@ class RegMethod(SAC, ABC):
     @dataclass
     class Config(SAC.Config):
         """ Hyper-Parameters of a regularization method for CRL. """
-
-        cl_reg_coef: float = 0.0
+        # Regularization coefficient.
+        cl_reg_coef: float = 1e-4
 
     def __init__(self, algo_config: "RegMethod.Config"):
         super().__init__(algo_config=algo_config)
@@ -64,7 +64,9 @@ class RegMethod(SAC, ABC):
 class L2Regularization(RegMethod):
     @dataclass
     class Config(RegMethod.Config):
-        pass
+        """ Hyper-parameters of the L2 regularization method. """
+        # Regularization coefficient.
+        cl_reg_coef: float = categorical(1e-2, 1e-1, 1, 1e2, 1e3, 1e4, 1e5, default=1e5)
 
     def __init__(self, algo_config: "L2Regularization.Config"):
         super().__init__(algo_config=algo_config)
@@ -78,9 +80,24 @@ class L2Regularization(RegMethod):
 
 
 class EWC(RegMethod):
+    """ Elastic Weight Consolidation method """
+    
+    __citation__ = """
+    @misc{kirkpatrick2017overcoming,
+        title={Overcoming catastrophic forgetting in neural networks}, 
+        author={James Kirkpatrick and Razvan Pascanu and Neil Rabinowitz and Joel Veness and Guillaume Desjardins and Andrei A. Rusu and Kieran Milan and John Quan and Tiago Ramalho and Agnieszka Grabska-Barwinska and Demis Hassabis and Claudia Clopath and Dharshan Kumaran and Raia Hadsell},
+        year={2017},
+        eprint={1612.00796},
+        archivePrefix={arXiv},
+        primaryClass={cs.LG}
+    }
+    """
+
     @dataclass
     class Config(RegMethod.Config):
-        pass
+        """ Hyper-parameters of the EWC regularization method. """
+        # EWC Regularization coefficient.
+        cl_reg_coef: float = categorical(1e-2, 1e-1, 1, 1e2, 1e3, 1e4, 1e5, default=1e4)
 
     def __init__(self, algo_config: "EWC.Config"):
         super().__init__(algo_config=algo_config)
@@ -98,9 +115,23 @@ class EWC(RegMethod):
 
 
 class MAS(RegMethod):
+    """ Memory Aware Synapses Method. """
+    __citation__ = """
+    @misc{aljundi2018memory,
+        title={Memory Aware Synapses: Learning what (not) to forget}, 
+        author={Rahaf Aljundi and Francesca Babiloni and Mohamed Elhoseiny and Marcus Rohrbach and Tinne Tuytelaars},
+        year={2018},
+        eprint={1711.09601},
+        archivePrefix={arXiv},
+        primaryClass={cs.CV}
+    }
+    """
+
     @dataclass
     class Config(RegMethod.Config):
-        pass
+        """ Hyper-parameters of the MAS regularization method. """
+        # MAS Regularization coefficient.
+        cl_reg_coef: float = categorical(1e-2, 1e-1, 1, 1e2, 1e3, 1e4, 1e5, default=1e4)
 
     def __init__(self, algo_config: "MAS.Config"):
         super().__init__(algo_config=algo_config)
