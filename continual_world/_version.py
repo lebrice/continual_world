@@ -42,7 +42,7 @@ def get_config():
     cfg.VCS = "git"
     cfg.style = "pep440-post"
     cfg.tag_prefix = "v"
-    cfg.parentdir_prefix = "sequoia.methods.continual_world-"
+    cfg.parentdir_prefix = "continual_world-"
     cfg.versionfile_source = "continual_world/_version.py"
     cfg.verbose = False
     return cfg
