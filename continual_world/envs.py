@@ -2,7 +2,6 @@ from copy import deepcopy
 from typing import List, Optional, Sequence, Type, Union
 from functools import lru_cache
 import gym
-import metaworld
 import numpy as np
 from gym import spaces
 from gym.wrappers import TimeLimit
@@ -11,11 +10,24 @@ from continual_world.utils.wrappers import (OneHotAdder, RandomizationWrapper, S
                             SuccessCounter)
 from pathlib import Path
 
+METAWORLD_INSTALLED = False
+try:
+    from metaworld import MT50
+    METAWORLD_INSTALLED = True
+except ImportError:
+    class MT50:
+        pass
 
-_MT50: Optional[metaworld.MT50] = None
+
+_MT50: Optional[MT50] = None
+
 
 @lru_cache(1)
 def get_mt50():
+    if not METAWORLD_INSTALLED:
+        raise RuntimeError(
+            "metaworld needs to be installed in order to use this function."
+        )
     global _MT50
     if _MT50 is not None:
         return _MT50
