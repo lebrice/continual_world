@@ -59,5 +59,18 @@ class VCL(SAC):
 
     def handle_task_boundary(self, task_id: int, training: bool) -> None:
         super().handle_task_boundary(task_id=task_id, training=training)
+        
+        
         if training and task_id > 0:
             self.vcl_helper.update_prior()
+
+    # @tf.function
+    def get_action(self, obs: tf.Tensor, deterministic: bool=tf.constant(False)) -> tf.Tensor:
+        # NOTE: (from the original implementation):
+        # Disabling multiple samples in VCL for faster evaluation
+        # mu, log_std, pi, logp_pi = self.actor(tf.expand_dims(obs, 0), samples_num=10)
+        mu, log_std, pi, logp_pi = self.actor(tf.expand_dims(obs, 0))
+        if deterministic:
+            return mu[0]
+        else:
+            return pi[0]

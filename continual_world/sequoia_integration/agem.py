@@ -15,6 +15,10 @@ class AGEM(SAC):
         episodic_mem_per_task: int = 0
         episodic_batch_size: int = 0
 
+    def __init__(self, algo_config: "AGEM.Config"):
+        super().__init__(algo_config=algo_config)
+        self.algo_config: AGEM.Config
+
     def configure(self, setting: DiscreteTaskAgnosticRLSetting) -> None:
         super().configure(setting)
         episodic_mem_size = self.algo_config.episodic_mem_per_task * self.num_tasks
@@ -52,12 +56,12 @@ class AGEM(SAC):
         episodic_batch: BatchDict = None,
     ) -> Tuple[GradientsTuple, Dict]:
         gradients, metrics = super().get_gradients(
-            seq_idx,
+            tf.convert_to_tensor(seq_idx),
             obs1=obs1,
             obs2=obs2,
             acts=acts,
             rews=rews,
-            done=done,
+            done=tf.convert_to_tensor(done),
             episodic_batch=None,
         )
 
@@ -70,12 +74,12 @@ class AGEM(SAC):
                 )
 
             ref_gradients, _ = super().get_gradients(
-                seq_idx,
+                tf.convert_to_tensor(seq_idx),
                 obs1=episodic_batch["obs1"],
                 obs2=episodic_batch["obs2"],
                 acts=episodic_batch["acts"],
                 rews=episodic_batch["rews"],
-                done=episodic_batch["done"],
+                done=tf.convert_to_tensor(episodic_batch["done"]),
             )
             gradients, violation = self.agem_helper.adjust_gradients(
                 gradients, ref_gradients

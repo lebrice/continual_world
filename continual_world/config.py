@@ -18,10 +18,7 @@ class TaskConfig(Serializable):
 
     # Name of the sequence you want to run
     tasks: str = choice(*list(task_seq_to_task_list.keys()))  # type: ignore
-    # Types of logger used.
-    logger_output: List[Literal["neptune", "tensorboard", "tsv"]] = choice(  # type: ignore
-        "neptune", "tensorboard", "tsv",
-    )
+
     # Random seed used for running the experiments
     seed: int = 123
     # Numer of steps per task
@@ -34,7 +31,6 @@ class TaskConfig(Serializable):
     num_test_eps_stochastic: int = 10
     num_test_eps_deterministic: int = 1
 
-    log_every: int=20_000
 
 
 # TODO: This AlgoConfig is more like a CLAlgoConfig, since `run_single` doesnt have these params.

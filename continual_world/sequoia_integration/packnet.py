@@ -13,7 +13,7 @@ from sequoia.settings.rl import TaskIncrementalRLSetting
 from .base_sac_method import GradientsTuple, SAC
 
 
-class PackNet(SAC, target_setting=TaskIncrementalRLSetting):
+class PackNet(SAC, target_setting=TaskIncrementalRLSetting):  # type: ignore
     # NOTE: This PackNet method requires task labels for now.
 
     @dataclass

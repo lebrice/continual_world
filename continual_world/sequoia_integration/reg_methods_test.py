@@ -1,10 +1,18 @@
 from typing import ClassVar, Type
 from .base_sac_method_test import TestSACMethod as SACMethodTests
 from .reg_methods import RegMethod, L2Regularization, EWC, MAS
+import pytest
+from sequoia.common.config import Config
 
 
 class RegMethodTests(SACMethodTests):
     Method: ClassVar[Type[RegMethod]]
+
+    @pytest.fixture
+    def method(self, config: Config):
+        """ Fixture that provides the Method that will be used for testing. """
+        algo_config = self.Method.Config(start_steps=50, update_after=50)
+        return self.Method(algo_config=algo_config)
 
 
 class TestL2RegMethod(RegMethodTests):

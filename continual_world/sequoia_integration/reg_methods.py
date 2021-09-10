@@ -17,6 +17,8 @@ from .base_sac_method import SAC
 
 
 class RegMethod(SAC, ABC):
+    """ Base class for regularization-based CL methods on top of the SAC backbone. """
+
     @dataclass
     class Config(SAC.Config):
         """ Hyper-Parameters of a regularization method for CRL. """
@@ -38,19 +40,35 @@ class RegMethod(SAC, ABC):
 
     @abstractmethod
     def get_reg_helper(self) -> RegularizationHelper:
+        """ Create the regularization helper for this method. 
+        
+        Regularization methods need to implement this.
+        """
         raise NotImplementedError()
 
-    def get_auxiliary_loss(self, seq_idx: int) -> Tuple[tf.Tensor, tf.Tensor]:
-        aux_pi_loss, aux_value_loss = super().get_auxiliary_loss(seq_idx=seq_idx)
-        reg_loss = self.reg_helper.regularize(self.old_params)
-        # TODO: Could also avoid computing the reg loss if we're going to multiply it by 0 anyway.
-        reg_loss_coef = tf.cond(
-            seq_idx > 0, lambda: self.algo_config.cl_reg_coef, lambda: 0.0
-        )
-        reg_loss *= reg_loss_coef
-        aux_pi_loss += reg_loss
-        aux_value_loss += reg_loss
-        return aux_pi_loss, aux_value_loss
+    def get_auxiliary_losses(self, seq_idx: int) -> Tuple[tf.Tensor, tf.Tensor]:
+        """ Get auxiliary losses for the actor and critic for the given task index.
+
+        This is where the regularization methods do their work.
+        """
+        # NOTE: calling super()'s version even though it returns tf.zeros, because if we were to
+        # eventually inherit from multiple regularization methods, then perhaps we could add the
+        # losses. 
+        aux_actor_loss, aux_critic_loss = super().get_auxiliary_losses(seq_idx=seq_idx)
+        if seq_idx > 0:
+            reg_loss = self.algo_config.cl_reg_coef * self.reg_helper.regularize(self.old_params)
+            aux_actor_loss += reg_loss
+            aux_critic_loss += reg_loss
+        return aux_actor_loss, aux_critic_loss
+        # NOTE: Could also avoid computing the reg loss if we're going to multiply it by 0 anyway?
+        # reg_loss = self.reg_helper.regularize(self.old_params)
+        # reg_loss_coef = tf.cond(
+        #     seq_idx > 0, lambda: self.algo_config.cl_reg_coef, lambda: 0.0
+        # )
+        # reg_loss *= reg_loss_coef
+        # aux_actor_loss += reg_loss
+        # aux_critic_loss += reg_loss
+        # return aux_actor_loss, aux_critic_loss
 
     def handle_task_boundary(self, task_id: int, training: bool) -> None:
         super().handle_task_boundary(task_id=task_id, training=training)
@@ -62,6 +80,11 @@ class RegMethod(SAC, ABC):
 
 
 class L2Regularization(RegMethod):
+    """ Simple L2 regularization method.
+    
+    Tries to prevent the weights from changing to much with respect to the old weights by adding an
+    L2 penalty.
+    """
     @dataclass
     class Config(RegMethod.Config):
         """ Hyper-parameters of the L2 regularization method. """
@@ -80,7 +103,7 @@ class L2Regularization(RegMethod):
 
 
 class EWC(RegMethod):
-    """ Elastic Weight Consolidation method """
+    """ Elastic Weight Consolidation method. """
     
     __citation__ = """
     @misc{kirkpatrick2017overcoming,
