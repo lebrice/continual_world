@@ -53,6 +53,8 @@ def _choose_head(out: tf.Tensor, obs: tf.Tensor, num_heads: int):
     # obs = tf.reshape(obs[:, -num_heads:], [batch_size, num_heads, 1])
 
     output_head_coefficients: tf.Tensor
+
+    # NOTE: AutoGraph isn't able to convert this check.
     if obs.shape[1] > num_heads:
         # If the shape[1] is greater than num_heads, that means the task labels are present.
         task_labels_onehot = obs[:, -num_heads:]
@@ -97,9 +99,8 @@ class Actor(Model, ABC):
         self.hide_task_id = hide_task_id
 
         if self.hide_task_id:
-            pass
-            # assert False, self.input_dim
-            # self.input_dim = MW_OBS_LEN
+            # NOTE: This is specific to meta-world and is never used with Sequoia.
+            self.input_dim = MW_OBS_LEN
 
     @abstractmethod
     def call(self, x: tf.Tensor) -> ActorOutput:
@@ -143,9 +144,8 @@ class MlpActor(Actor):
     def call(self, x: tf.Tensor) -> ActorOutput:
         obs = x
         if self.hide_task_id:
-            # NOTE: Changing this, since it only applies to mujoco envs!
-            # x = x[:, :MW_OBS_LEN]
-            x = x[:, :self.input_dim]
+            # NOTE: This is specific to meta-world and is never used with Sequoia.
+            x = x[:, :MW_OBS_LEN]
         x = self.core(x)
         mu = self.head_mu(x)
         log_std = self.head_log_std(x)
@@ -195,9 +195,8 @@ class MlpCritic(Model):
         self.num_heads = num_heads
         self.input_dim = input_dim
         if self.hide_task_id:
-            # NOTE: If /self.hide_task_id is True, then the env won't add the task ids anyway.
-            pass
-            # input_dim = MW_OBS_LEN + MW_ACT_LEN
+            # NOTE: This is specific to meta-world and is never used with Sequoia.
+            self.input_dim = MW_OBS_LEN + MW_ACT_LEN
         
         self.core = mlp(input_dim, hidden_sizes, activation, use_layer_norm=use_layer_norm)
         self.head = tf.keras.Sequential(
@@ -207,6 +206,7 @@ class MlpCritic(Model):
     def call(self, x, a):
         obs = x
         if self.hide_task_id:
+            # NOTE: This is specific to meta-world and is never used with Sequoia.
             x = x[:, :MW_OBS_LEN]
         x = self.head(self.core(tf.concat([x, a], axis=-1)))
         if self.num_heads > 1:

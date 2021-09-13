@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Dict, Final, Optional, Tuple
+from typing import Tuple
 
 import tensorflow as tf
 from continual_world.methods.regularization import (
@@ -9,7 +9,6 @@ from continual_world.methods.regularization import (
     MASHelper,
     RegularizationHelper,
 )
-from continual_world.methods.vcl import VclMlpActor
 from sequoia.settings.rl.discrete.setting import DiscreteTaskAgnosticRLSetting
 from sequoia.settings.rl.setting import RLSetting
 from simple_parsing.helpers.hparams import categorical

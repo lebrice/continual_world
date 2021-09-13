@@ -32,14 +32,15 @@ class PackNet(SAC, target_setting=TaskIncrementalRLSetting):  # type: ignore
             packnet_models.extend([self.critic1, self.critic2])
         self.packnet_helper = PackNetHelper(packnet_models)
 
+    @tf.function
     def get_gradients(
         self,
-        seq_idx: int,
+        seq_idx: tf.Tensor,
         obs1: tf.Tensor,
         obs2: tf.Tensor,
         acts: tf.Tensor,
         rews: tf.Tensor,
-        done: bool,
+        done: tf.Tensor,
         episodic_batch: BatchDict = None,
     ) -> Tuple[GradientsTuple, Dict]:
         gradients, metrics = super().get_gradients(

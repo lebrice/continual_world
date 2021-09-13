@@ -7,7 +7,7 @@ import tensorflow.keras as tfk
 from tensorflow.keras import Input, Model
 from tensorflow.python.ops import nn
 
-# from continual_world.envs import MW_OBS_LEN, MW_ACT_LEN
+from continual_world.envs import MW_OBS_LEN, MW_ACT_LEN
 from continual_world.spinup.models import apply_squashing_func, gaussian_likelihood, _choose_head
 
 EPS = 1e-8
@@ -168,10 +168,8 @@ class VclMlpActor(Actor):
         self.hide_task_id = hide_task_id
 
         if self.hide_task_id:
-            # NOTE: This is different, we're just not going to add the task labels if we were going
-            # to remove them anyway.
-            pass
-            # input_dim = MW_OBS_LEN
+            # NOTE: This is specific to meta-world and is never used with Sequoia.
+            input_dim = MW_OBS_LEN
 
         self.core = variational_mlp(
             input_dim,
@@ -207,8 +205,9 @@ class VclMlpActor(Actor):
         input_x = x
         full_obs = x
         if self.hide_task_id:
-            input_x = input_x[:, :self.input_dim]
-            # input_x = input_x[:, :MW_OBS_LEN]
+            # NOTE: This is specific to meta-world and is never used with Sequoia.
+            input_x = input_x[:, :MW_OBS_LEN]
+
         mus, pis = [], []
 
         for sample_idx in range(samples_num):

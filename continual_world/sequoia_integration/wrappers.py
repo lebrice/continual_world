@@ -15,17 +15,6 @@ from sequoia.settings.rl.continual.objects import Actions, Observations, Rewards
 from sequoia.settings.rl.environment import RLEnvironment
 
 
-# @add_task_labels.register(dict)
-# def _add_task_labels_to_dict(
-#     observation: Dict[str, V], task_labels: T
-# ) -> Dict[str, Union[V, T]]:
-#     new: Dict[str, Union[V, T]] = {key: value for key, value in observation.items()}
-#     # TODO: Raise a warning instead?
-#     # assert "task_labels" not in new
-#     new["task_labels"] = task_labels
-#     return type(observation)(**new)  # type: ignore
-
-
 def wrap_sequoia_env(
     env: RLEnvironment,
     nb_tasks_in_env: int,
