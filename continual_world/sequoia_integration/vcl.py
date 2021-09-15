@@ -68,6 +68,7 @@ class VCL(SAC):
     def get_action(self, obs: tf.Tensor, deterministic: bool=tf.constant(False)) -> tf.Tensor:
         # NOTE: (from the original implementation):
         # Disabling multiple samples in VCL for faster evaluation
+        return super().get_action(obs=obs, deterministic=deterministic)
         # mu, log_std, pi, logp_pi = self.actor(tf.expand_dims(obs, 0), samples_num=10)
         mu, log_std, pi, logp_pi = self.actor(tf.expand_dims(obs, 0))
         if deterministic:

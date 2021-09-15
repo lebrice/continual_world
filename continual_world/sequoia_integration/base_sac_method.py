@@ -75,7 +75,7 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
 
     # The name for this family of methods.
     family: ClassVar[str] = "continual_world"
-    
+
     @dataclass
     class Config(HyperParameters):
         """ Configuration options for the Algorithm. """
@@ -183,11 +183,11 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
         self.actor_kwargs: Dict = {}
         self.critic_kwargs: Dict = {}
         self.current_task_idx: int = -1
-        #self.logger: EpochLogger
+        # self.logger: EpochLogger
         self.replay_buffer: Union[ReplayBuffer, ReservoirReplayBuffer]
 
         self.use_wandb: bool = True
-        
+
         # Wether the 'alpha' parameter should be learned or fixed.
         # When the alpha parameter is to be learned and the setting provides task ids, a value of
         # alpha is learned for each task. When the task labels aren't available, a single value is
@@ -238,7 +238,34 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
         else:
             self.use_wandb = False
 
-        #self.logger = EpochLogger(
+        # Need to start using the model at the latest after having used 1/10 of the step budget.
+        if self.algo_config.start_steps > setting.steps_per_phase // 10:
+            self.algo_config.start_steps = setting.steps_per_phase // 10
+            warnings.warn(
+                RuntimeWarning(
+                    f"Reducing algo_config.start_steps to {self.algo_config.start_steps}"
+                )
+            )
+
+        # Need at least 10 updates per 'fit' call.
+        if self.algo_config.update_every > setting.steps_per_phase // 10:
+            self.algo_config.update_every = setting.steps_per_phase // 10
+            warnings.warn(
+                RuntimeWarning(
+                    f"Reducing algo_config.update_every to {self.algo_config.update_every}"
+                )
+            )
+
+        # Need to start updating the model at most after having used 1/10 of the step budget.
+        if self.algo_config.update_after > setting.steps_per_phase // 10:
+            self.algo_config.update_after = setting.steps_per_phase // 10
+            warnings.warn(
+                RuntimeWarning(
+                    f"Reducing algo_config.update_after to {self.algo_config.update_after}"
+                )
+            )
+
+        # self.logger = EpochLogger(
         #     self.algo_config.logger_output,
         #     config=dict(**asdict(self.task_config), **asdict(self.algo_config)),
         # )
@@ -262,12 +289,14 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
         if self.algo_config.hide_task_id:
             # If we were dependant on having the task ids as inputs to the models, need to
             # change that value.
-            warnings.warn(RuntimeWarning(
-                f"Disabling the `hide_task_id` option, because the envs from Sequoia won't give "
-                f"task ids when they aren't available anyway, so no need to hide them."
-            ))
+            warnings.warn(
+                RuntimeWarning(
+                    f"Disabling the `hide_task_id` option, because the envs from Sequoia won't give "
+                    f"task ids when they aren't available anyway, so no need to hide them."
+                )
+            )
             # TODO: Setting this to True isn't great, because we could have instead used the
-            # task id to condition the policies, and somehow do task inference.. 
+            # task id to condition the policies, and somehow do task inference..
             self.algo_config.hide_task_id = False
 
         self.obs_dim = np.prod(setting.observation_space.x.shape)
@@ -276,7 +305,7 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
             # TODO: Actually check that the algos can work without the task ids.
             self.obs_dim += setting.nb_tasks
 
-        # BUG: (https://github.com/lebrice/Sequoia/issues/240) 
+        # BUG: (https://github.com/lebrice/Sequoia/issues/240)
         # When setting has nb_tasks=1, it actually has 2 tasks in the env observation space.
         if isinstance(setting.action_space, spaces.Dict):
             action_space = setting.action_space["y_pred"]
@@ -383,7 +412,8 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
         obs, ep_ret, ep_len = env.reset(), 0, 0
 
         # Main loop: collect experience in env and update/log each epoch
-        for t in tqdm(range(steps), desc="Training"):
+        epoch_pbar = tqdm(range(steps), desc="Training", position=0)
+        for t in epoch_pbar:
             # NOTE: Moving this 'on task change' to `on_task_switch`.
             # TODO: This might actually make some sense, if we consider multi-task and traditional
             # envs, which will change tasks always. However, the task distribution is nonstationary
@@ -442,24 +472,38 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
                 # NOTE: @lebrice: Interesting: Perform one update per step, even when `update_every`
                 # is an interval, i.e. "perform 50 updates every 50 steps".
 
-                for update_step in range(self.algo_config.update_every):
+                pbar = tqdm(
+                    range(self.algo_config.update_every),
+                    desc="Updating the model",
+                    position=1,
+                    leave=False,
+                )
+                for update_step in pbar:
                     batch, episodic_batch = self.sample_batches()
                     results = self.learn_on_batch(
-                        tf.convert_to_tensor(self.current_task_idx), batch, episodic_batch,
+                        seq_idx=tf.convert_to_tensor(self.current_task_idx),
+                        batch=batch,
+                        episodic_batch=episodic_batch,
                     )
+                    vals = {
+                        "train/q1_vals": results["q1"],
+                        "train/q2_vals": results["q2"],
+                        "train/log_pi": results["logp_pi"],
+                        "train/loss_pi": results["pi_loss"],
+                        "train/loss_q1": results["q1_loss"],
+                        "train/loss_q2": results["q2_loss"],
+                        "train/loss_reg": results["reg_loss"],
+                        "train/agem_violation": results["agem_violation"],
+                    }
+                    epoch_pbar.set_postfix({
+                        "train/loss_pi": float(results["pi_loss"][0]),
+                        "train/loss_q1": float(results["q1_loss"]),
+                        "train/loss_q2": float(results["q2_loss"]),
+                        "train/loss_reg": float(results["reg_loss"][0]),
+                    })
+                    # pbar.set_postfix(vals)
                     if self.use_wandb:
-                        wandb.log(
-                            {
-                                "train/q1_vals": results["q1"],
-                                "train/q2_vals": results["q2"],
-                                "train/log_pi": results["logp_pi"],
-                                "train/loss_pi": results["pi_loss"],
-                                "train/loss_q1": results["q1_loss"],
-                                "train/loss_q2": results["q2_loss"],
-                                "train/loss_reg": results["reg_loss"],
-                                "train/agem_violation": results["agem_violation"],
-                            }
-                        )
+                        wandb.log(vals)
 
                     for task_id in range(self.num_tasks):
                         if not self.use_wandb:
@@ -475,9 +519,7 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
                                 )
                             else:
                                 assert self.log_alpha is not None
-                                wandb.log(
-                                    {"train/alpha": float(tf.math.exp(self.log_alpha))}
-                                )
+                                wandb.log({"train/alpha": float(tf.math.exp(self.log_alpha))})
                         # if self.critic_cl is PopArtMlpCritic: # (NOTE: using isinstance instead)
                         if isinstance(self.critic1, PopArtMlpCritic):
                             wandb.log(
@@ -493,11 +535,7 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
             if ((t + 1) % self.algo_config.log_every == 0) or (t + 1 == steps):
                 epoch = (t + 1 + self.algo_config.log_every - 1) // self.algo_config.log_every
                 self.end_of_epoch(
-                    train_env=env,
-                    val_env=val_env,
-                    epoch=epoch,
-                    t=t,
-                    seq_idx=info.get("seq_idx"),
+                    train_env=env, val_env=val_env, epoch=epoch, t=t, seq_idx=info.get("seq_idx"),
                 )
 
             self.current_task_t += 1
@@ -539,26 +577,27 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
         # )
         self.test_agent([val_env])
 
-        # Log info about epoch
-        wandb.log({"epoch": epoch})
-        # BUG: Not getting a value stored in `train/return` because it seems like an
-        # end-of-episode (done=True) isn't achieved in the current test setup.
-        #self.logger.log_tabular("train/return", with_min_and_max=True)
-        #self.logger.log_tabular("train/ep_length", average_only=True)
-        wandb.log({"total_env_steps": t + 1})
-        wandb.log({"current_task_steps": self.current_task_t + 1})
-        #self.logger.log_tabular("train/q1_vals", with_min_and_max=True)
-        #self.logger.log_tabular("train/q2_vals", with_min_and_max=True)
-        #self.logger.log_tabular("train/log_pi", with_min_and_max=True)
-        #self.logger.log_tabular("train/loss_pi", average_only=True)
-        #self.logger.log_tabular("train/loss_q1", average_only=True)
-        #self.logger.log_tabular("train/loss_q2", average_only=True)
-        if self.auto_alpha and self.log_alpha is not None:
-            assert self.log_alpha is not None
-            wandb.log({"train/log_alpha": self.log_alpha})
-            #self.logger.log_tabular(
-            #     "train/alpha", average_only=True,  # val=self.log_alpha
-            # )
+        if self.use_wandb:
+            # Log info about epoch
+            wandb.log({"epoch": epoch})
+            # BUG: Not getting a value stored in `train/return` because it seems like an
+            # end-of-episode (done=True) isn't achieved in the current test setup.
+            # self.logger.log_tabular("train/return", with_min_and_max=True)
+            # self.logger.log_tabular("train/ep_length", average_only=True)
+            wandb.log({"total_env_steps": t + 1})
+            wandb.log({"current_task_steps": self.current_task_t + 1})
+            # self.logger.log_tabular("train/q1_vals", with_min_and_max=True)
+            # self.logger.log_tabular("train/q2_vals", with_min_and_max=True)
+            # self.logger.log_tabular("train/log_pi", with_min_and_max=True)
+            # self.logger.log_tabular("train/loss_pi", average_only=True)
+            # self.logger.log_tabular("train/loss_q1", average_only=True)
+            # self.logger.log_tabular("train/loss_q2", average_only=True)
+            if self.auto_alpha and self.log_alpha is not None:
+                assert self.log_alpha is not None
+                wandb.log({"train/log_alpha": self.log_alpha})
+                # self.logger.log_tabular(
+                #     "train/alpha", average_only=True,  # val=self.log_alpha
+                # )
         for task_id in range(self.num_tasks):
             if self.auto_alpha:
                 if self.all_log_alpha is not None:
@@ -568,21 +607,22 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
             # if self.critic_cl is PopArtMlpCritic:
             if isinstance(self.critic1, PopArtMlpCritic):
                 pass
-                #self.logger.log_tabular(f"train/popart_mean/{task_id}", average_only=True)
-                #self.logger.log_tabular(f"train/popart_std/{task_id}", average_only=True)
-        #self.logger.log_tabular("train/loss_reg", average_only=True)
-        #self.logger.log_tabular("train/agem_violation", average_only=True)
+                # self.logger.log_tabular(f"train/popart_mean/{task_id}", average_only=True)
+                # self.logger.log_tabular(f"train/popart_std/{task_id}", average_only=True)
+        # self.logger.log_tabular("train/loss_reg", average_only=True)
+        # self.logger.log_tabular("train/agem_violation", average_only=True)
 
         # TODO: We assume here that SuccessCounter is outermost wrapper.
         avg_success = np.mean(train_env.pop_successes())
-        wandb.log({"train/success": avg_success})
-        if seq_idx is not None:
-            pass
-            wandb.log({f"train/active_env": seq_idx})
-            # self.logger.log_tabular("train/active_env", seq_idx)
-        wandb.log({"walltime": time.time() - self.start_time})
+        if self.use_wandb:
+            wandb.log({"train/success": avg_success})
+            if seq_idx is not None:
+                pass
+                wandb.log({f"train/active_env": seq_idx})
+                # self.logger.log_tabular("train/active_env", seq_idx)
+            wandb.log({"walltime": time.time() - self.start_time})
         # self.logger.log_tabular("walltime", time.time() - self.start_time)
-        #self.logger.dump_tabular()
+        # self.logger.dump_tabular()
 
     def sample_batches(self) -> Tuple[BatchDict, Optional[BatchDict]]:
         batch = self.replay_buffer.sample_batch(self.algo_config.batch_size)
@@ -663,33 +703,43 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
     ) -> Union[DiscreteTaskAgnosticRLSetting.Actions, Any]:
         # BUG: In TraditionalRLSetting, we get some weird task ids during test time, makes no sense.
         if observations.task_labels != self._last_task_ids:
-            print(f"New task ids: {observations.task_labels} (obs = {observations})")
+            logger.debug(f"New task ids: {observations.task_labels} (obs = {observations})")
         if observations.done:
-            print(f"Obs has done=True: {observations}")
+            logger.debug(f"Obs has done=True: {observations}")
         self._last_task_ids = observations.task_labels
 
-        obs = concat_x_and_t(observations, nb_tasks=self.num_tasks)
+        if self.add_task_ids:
+            obs = concat_x_and_t(observations, nb_tasks=self.num_tasks)
+        else:
+            obs = observations.x
+
         action: tf.Tensor = self.get_action(tf.convert_to_tensor(obs))
         action_np = action.numpy()
         if isinstance(action_space, TypedDictSpace):
-            return action_space.dtype(**action_np)
+            return action_space.dtype(action_np)
         return action_np
 
-    # @tf.function
+    # @tf.function(experimental_follow_type_hints=True)
     def learn_on_batch(
-        self, seq_idx: tf.Tensor, batch: BatchDict, episodic_batch: BatchDict = None
+        self, seq_idx: tf.Tensor, batch: BatchDict, episodic_batch: Optional[BatchDict] = None
     ) -> Dict:
-        gradients, metrics = self.get_gradients(seq_idx, **batch, episodic_batch=episodic_batch)
-
+        gradients, metrics = self.get_gradients(
+            seq_idx=seq_idx,
+            obs1=batch["obs1"],
+            obs2=batch["obs2"],
+            acts=batch["acts"],
+            rews=batch["rews"],
+            done=batch["done"],
+            episodic_batch=episodic_batch,
+        )
+        actor_gradients, critic_gradients, alpha_gradient = gradients
         if self.algo_config.clipnorm is not None:
-            actor_gradients, critic_gradients, alpha_gradient = gradients
             gradients = GradientsTuple(
                 tf.clip_by_global_norm(actor_gradients, self.algo_config.clipnorm)[0],
                 tf.clip_by_global_norm(critic_gradients, self.algo_config.clipnorm)[0],
                 tf.clip_by_norm(alpha_gradient, self.algo_config.clipnorm),
             )
-
-        self.apply_update(*gradients)
+        self.apply_update(actor_gradients, critic_gradients, alpha_gradient)
         return metrics
 
     def get_learn_on_batch(self):
@@ -735,8 +785,8 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
         obs2: tf.Tensor,
         acts: tf.Tensor,
         rews: tf.Tensor,
-        done: bool,
-        episodic_batch: BatchDict = None,
+        done: tf.Tensor,
+        episodic_batch: Optional[BatchDict] = None,
     ) -> Tuple[GradientsTuple, Dict]:
         with tf.GradientTape(persistent=True) as g:
             # Main outputs from computation graph
@@ -765,7 +815,8 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
                 log_alpha = tf.math.log(self.algo_config.alpha)
 
             # Entropy-regularized Bellman backup for Q functions, using Clipped Double-Q targets
-            if self.critic_cl is PopArtMlpCritic:
+            if isinstance(self.critic1, PopArtMlpCritic):
+                # if self.critic_cl is PopArtMlpCritic:
                 q_backup = tf.stop_gradient(
                     self.critic1.normalize(
                         rews
@@ -898,7 +949,7 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
                     prefix = f"test/{mode}/{task_id}/{test_env.name}"
                     for key, metric in metric_dict.items():
                         pass
-                        #self.logger.log_tabular(
+                        # self.logger.log_tabular(
                         #     key=f"{prefix}/{key}", val=np.mean(metric),
                         # )
 
@@ -907,7 +958,7 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
 
         for deterministic, successes in successes_per_mode.items():
             mode = "deterministic" if deterministic else "stochastic"
-            #self.logger.log_tabular(f"test/{mode}/average_success", np.mean(successes))
+            # self.logger.log_tabular(f"test/{mode}/average_success", np.mean(successes))
 
     def on_test_episode_start(self, seq_idx: int, episode: int) -> None:
         pass
@@ -987,13 +1038,21 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
         task_id : Optional[int]
             [description]
         """
-        logger.info(f"on_task_switch called with task_id = {task_id} (training={self.training})")
+        logger.info(
+            f"on_task_switch called with task_id = {task_id} (training={self.training}, "
+            f"self.current_task_idx={self.current_task_idx})"
+        )
         if self.current_task_idx == task_id:
             logger.info(
                 f"Ignoring call to `on_task_switch` since task_id ({task_id}) is the same as "
                 f"before ({self.current_task_idx}). (self.training={self.training})."
             )
             return
+        else:
+            logger.info(
+                f"Calling handle_task_boundary "
+                f"(self.current_task_idx={self.current_task_idx}, task_id={task_id}"
+            )
 
         if task_id is None:
             task_id = -1
@@ -1044,6 +1103,19 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
         )
 
     def handle_task_boundary(self, task_id: int, training: bool) -> None:
+        """Hook added for the subclasses of SAC, to customize what they want to do when a task
+        boundary is reached.
+        
+        NOTE: This is necessary because we have some things we want to do both before and after this
+        block of code.
+
+        Parameters
+        ----------
+        task_id : int
+            The index of the new task.
+        training : bool
+            Wether the task boundary is occuring during training or testing.
+        """
         pass
 
     @classmethod
@@ -1080,7 +1152,11 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
 
 def main():
     from sequoia.common.config import Config
-    from sequoia.settings.rl import IncrementalRLSetting, TaskIncrementalRLSetting, TraditionalRLSetting
+    from sequoia.settings.rl import (
+        IncrementalRLSetting,
+        TaskIncrementalRLSetting,
+        TraditionalRLSetting,
+    )
 
     algo_config = SAC.Config(start_steps=50)
     method = SAC(algo_config=algo_config)
@@ -1102,7 +1178,9 @@ def main():
         # wandb=WandbConfig(project="cw_debug", monitor_gym=True)
     )
 
-    results: TraditionalRLSetting.Results = setting.apply(method, config=Config(debug=True, render=False))
+    results: TraditionalRLSetting.Results = setting.apply(
+        method, config=Config(debug=True, render=False)
+    )
     # config = Config(debug=True)
     # method = SACMethod()
     # results = setting.apply(method, config=config)

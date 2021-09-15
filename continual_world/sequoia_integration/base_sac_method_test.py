@@ -1,4 +1,4 @@
-from typing import Callable, ClassVar, Dict, Tuple, Type
+from typing import Any, Callable, ClassVar, Dict, Tuple, Type
 from dataclasses import asdict
 import pytest
 from sequoia.common.config import Config
@@ -72,16 +72,31 @@ def test_get_random_performance_fixture(
     # used for this test.
     get_random_performance._cache.clear()  # type: ignore
 
+from continual_world.defaults import CL_DEFAULTS
 
 class TestSACMethod(MethodTests):
     Method: ClassVar[Type[SAC]] = SAC
     setting_kwargs: ClassVar[Dict[str, str]] = {
         "dataset": "MountainCarContinuous-v0",
-        "train_max_steps": 10_000,
+        "train_max_steps": 1_000,
+        "max_episode_steps": 100,
+        "nb_tasks": 2,
     }
 
     # Save the fixture here so we can use it in the other tests subclasses.
     get_random_performance = staticmethod(get_random_performance)
+
+    non_default_config_values: ClassVar[Dict[str, Any]] = {}
+    
+    def test_values_match_default(self):
+        config = self.Method.Config()
+        for key, default_value in CL_DEFAULTS.items():
+            if not hasattr(config, key):
+                continue
+            if key in ["seed"] or key in self.non_default_config_values:
+                continue
+            config_value = getattr(config, key)
+            assert config_value == default_value, (key, config_value, default_value)
 
     def test_configure_sets_values_properly(self, config: Config):
         algo_config = self.Method.Config(start_steps=50)
@@ -130,7 +145,7 @@ class TestSACMethod(MethodTests):
         # long.
         # BUG: The epoch logger doesn't get to store any metrics, which causes an IndexError when
         # `self.log_tabular` is called.
-        algo_config = self.Method.Config(start_steps=50, update_after=50)
+        algo_config = self.Method.Config(start_steps=50, update_after=50, update_every=100)
         return self.Method(algo_config=algo_config)
 
     def test_debug(

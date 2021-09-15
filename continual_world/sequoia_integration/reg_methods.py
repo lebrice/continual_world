@@ -24,7 +24,7 @@ class RegMethod(SAC, ABC):
         # Regularization coefficient.
         cl_reg_coef: float = 1e-4
 
-    def __init__(self, algo_config: "RegMethod.Config"):
+    def __init__(self, algo_config: "RegMethod.Config" = None):
         super().__init__(algo_config=algo_config)
         self.algo_config: RegMethod.Config
         self.reg_helper: RegularizationHelper
@@ -90,7 +90,7 @@ class L2Regularization(RegMethod):
         # Regularization coefficient.
         cl_reg_coef: float = categorical(1e-2, 1e-1, 1, 1e2, 1e3, 1e4, 1e5, default=1e5)
 
-    def __init__(self, algo_config: "L2Regularization.Config"):
+    def __init__(self, algo_config: "L2Regularization.Config" = None):
         super().__init__(algo_config=algo_config)
         self.algo_config: L2Regularization.Config
         self.reg_helper: L2Helper
@@ -121,7 +121,7 @@ class EWC(RegMethod):
         # EWC Regularization coefficient.
         cl_reg_coef: float = categorical(1e-2, 1e-1, 1, 1e2, 1e3, 1e4, 1e5, default=1e4)
 
-    def __init__(self, algo_config: "EWC.Config"):
+    def __init__(self, algo_config: "EWC.Config" = None):
         super().__init__(algo_config=algo_config)
         self.algo_config: EWC.Config
         self.reg_helper: EWCHelper
@@ -155,7 +155,7 @@ class MAS(RegMethod):
         # MAS Regularization coefficient.
         cl_reg_coef: float = categorical(1e-2, 1e-1, 1, 1e2, 1e3, 1e4, 1e5, default=1e4)
 
-    def __init__(self, algo_config: "MAS.Config"):
+    def __init__(self, algo_config: "MAS.Config" = None):
         super().__init__(algo_config=algo_config)
         self.algo_config: MAS.Config
         self.reg_helper: MASHelper

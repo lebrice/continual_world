@@ -1,4 +1,4 @@
-from typing import ClassVar, Type
+from typing import Any, ClassVar, Dict, Type
 from .base_sac_method_test import TestSACMethod as SACMethodTests
 from .reg_methods import RegMethod, L2Regularization, EWC, MAS
 import pytest
@@ -7,6 +7,8 @@ from sequoia.common.config import Config
 
 class RegMethodTests(SACMethodTests):
     Method: ClassVar[Type[RegMethod]]
+    
+    non_default_config_values: ClassVar[Dict[str, Any]] = {"cl_reg_coef": 1e-4}
 
     @pytest.fixture
     def method(self, config: Config):

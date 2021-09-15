@@ -15,7 +15,7 @@ class AGEM(SAC):
         episodic_mem_per_task: int = 0
         episodic_batch_size: int = 0
 
-    def __init__(self, algo_config: "AGEM.Config"):
+    def __init__(self, algo_config: "AGEM.Config" = None):
         super().__init__(algo_config=algo_config)
         self.algo_config: AGEM.Config
 
@@ -36,6 +36,9 @@ class AGEM(SAC):
                 self.algo_config.episodic_mem_per_task
             )
             self.episodic_memory.store_multiple(**new_episodic_mem)
+        # BUG: Gradients and var don't have the same shape!
+        self.learn_on_batch = tf.function(self.learn_on_batch)
+        self.get_gradients = tf.function(self.get_gradients)
 
     def sample_batches(self) -> Tuple[BatchDict, BatchDict]:
         batch, episodic_batch = super().sample_batches()
@@ -45,14 +48,15 @@ class AGEM(SAC):
             )
         return batch, episodic_batch
 
+    @tf.function
     def get_gradients(
         self,
-        seq_idx: int,
+        seq_idx: tf.Tensor,
         obs1: tf.Tensor,
         obs2: tf.Tensor,
         acts: tf.Tensor,
         rews: tf.Tensor,
-        done: bool,
+        done: tf.Tensor,
         episodic_batch: BatchDict = None,
     ) -> Tuple[GradientsTuple, Dict]:
         gradients, metrics = super().get_gradients(
@@ -67,6 +71,7 @@ class AGEM(SAC):
 
         # Warning: we refer here to the int task_idx in the parent function, not
         # the passed seq_idx.
+        # TODO: Does that make sense though?
         if self.current_task_idx > 0:
             if not episodic_batch:
                 raise RuntimeError(

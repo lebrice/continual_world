@@ -1,18 +1,26 @@
+import dataclasses
 import warnings
-from typing import Optional
+from dataclasses import dataclass
+from typing import Any, Optional
 
-from gym.wrappers import TimeLimit
 import gym
 import numpy as np
-from continual_world.utils.wrappers import SuccessCounter, ScaleReward
 from continual_world.envs import META_WORLD_TIME_HORIZON
+from continual_world.utils.wrappers import ScaleReward, SuccessCounter
 from gym import spaces
 from gym.spaces import Box
 from gym.utils.colorize import colorize
+from gym.wrappers import TimeLimit
 from sequoia.common.gym_wrappers import IterableWrapper
 from sequoia.settings.rl import RLEnvironment, RLSetting
 from sequoia.settings.rl.continual.objects import Actions, Observations, Rewards
 from sequoia.settings.rl.environment import RLEnvironment
+from sequoia.settings.rl.wrappers.task_labels import add_task_labels
+
+
+@add_task_labels.register(Observations)
+def _add_task_ids(obs: Observations, task_labels: Any) -> Observations:
+    return dataclasses.replace(obs, task_labels=task_labels)
 
 
 def wrap_sequoia_env(
@@ -25,9 +33,7 @@ def wrap_sequoia_env(
 ) -> "SequoiaToCWWrapper":
     # TODO: Implement a wrapper to mimic the `MultiTaskEnv` API from CW when the environment is
     # stationary.
-    env = SequoiaToCWWrapper(
-        env, nb_tasks_in_env=nb_tasks_in_env, add_task_labels=add_task_ids
-    )
+    env = SequoiaToCWWrapper(env, nb_tasks_in_env=nb_tasks_in_env, add_task_labels=add_task_ids)
     env = TimeLimit(env, max_episode_steps=META_WORLD_TIME_HORIZON)
     env = SuccessCounter(env)
 
@@ -66,9 +72,7 @@ def concat_x_and_t(observation: Observations, nb_tasks: int) -> np.ndarray:
 
 
 class SequoiaToCWWrapper(gym.Wrapper):
-    def __init__(
-        self, env: RLEnvironment, nb_tasks_in_env: int, add_task_labels: bool = False
-    ):
+    def __init__(self, env: RLEnvironment, nb_tasks_in_env: int, add_task_labels: bool = False):
         """Create a wrapper around a gym.Env from Sequoia so it matches the format from cw.
         
         Parameters
@@ -84,6 +88,9 @@ class SequoiaToCWWrapper(gym.Wrapper):
         # TODO: Create a 'Box' space with the one-hot of the task ID in there.
         x_space = env.observation_space.x
         t_space = env.observation_space.task_labels
+        from sequoia.common.spaces.sparse import Sparse
+        if isinstance(t_space, Sparse):
+            t_space = t_space.base
         self.onehot_len = t_space.n
         self.add_task_labels = add_task_labels
         if self.add_task_labels:
