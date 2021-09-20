@@ -38,7 +38,8 @@ setuptools.setup(
     },
     python_requires='>=3.7',
     install_requires=[
-        "tensorflow-gpu",
+        # NOTE: Removing the tensorflow-gpu requirement, because of the numpy conflict!
+        # "tensorflow-gpu",
         "simple-parsing",
     ],
 )

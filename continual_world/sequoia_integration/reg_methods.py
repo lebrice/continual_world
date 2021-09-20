@@ -21,6 +21,7 @@ class RegMethod(SAC, ABC):
     @dataclass
     class Config(SAC.Config):
         """ Hyper-Parameters of a regularization method for CRL. """
+
         # Regularization coefficient.
         cl_reg_coef: float = 1e-4
 
@@ -52,10 +53,12 @@ class RegMethod(SAC, ABC):
         """
         # NOTE: calling super()'s version even though it returns tf.zeros, because if we were to
         # eventually inherit from multiple regularization methods, then perhaps we could add the
-        # losses. 
+        # losses.
         aux_actor_loss, aux_critic_loss = super().get_auxiliary_losses(seq_idx=seq_idx)
         if seq_idx > 0:
-            reg_loss = self.algo_config.cl_reg_coef * self.reg_helper.regularize(self.old_params)
+            reg_loss = self.algo_config.cl_reg_coef * self.reg_helper.regularize(
+                self.old_params
+            )
             aux_actor_loss += reg_loss
             aux_critic_loss += reg_loss
         return aux_actor_loss, aux_critic_loss
@@ -84,9 +87,11 @@ class L2Regularization(RegMethod):
     Tries to prevent the weights from changing to much with respect to the old weights by adding an
     L2 penalty.
     """
+
     @dataclass
     class Config(RegMethod.Config):
         """ Hyper-parameters of the L2 regularization method. """
+
         # Regularization coefficient.
         cl_reg_coef: float = categorical(1e-2, 1e-1, 1, 1e2, 1e3, 1e4, 1e5, default=1e5)
 
@@ -103,7 +108,7 @@ class L2Regularization(RegMethod):
 
 class EWC(RegMethod):
     """ Elastic Weight Consolidation method. """
-    
+
     __citation__ = """
     @misc{kirkpatrick2017overcoming,
         title={Overcoming catastrophic forgetting in neural networks}, 
@@ -118,6 +123,7 @@ class EWC(RegMethod):
     @dataclass
     class Config(RegMethod.Config):
         """ Hyper-parameters of the EWC regularization method. """
+
         # EWC Regularization coefficient.
         cl_reg_coef: float = categorical(1e-2, 1e-1, 1, 1e2, 1e3, 1e4, 1e5, default=1e4)
 
@@ -138,6 +144,7 @@ class EWC(RegMethod):
 
 class MAS(RegMethod):
     """ Memory Aware Synapses Method. """
+
     __citation__ = """
     @misc{aljundi2018memory,
         title={Memory Aware Synapses: Learning what (not) to forget}, 
@@ -152,6 +159,7 @@ class MAS(RegMethod):
     @dataclass
     class Config(RegMethod.Config):
         """ Hyper-parameters of the MAS regularization method. """
+
         # MAS Regularization coefficient.
         cl_reg_coef: float = categorical(1e-2, 1e-1, 1, 1e2, 1e3, 1e4, 1e5, default=1e4)
 

@@ -55,7 +55,9 @@ class PackNet(SAC, target_setting=TaskIncrementalRLSetting):  # type: ignore
 
         actor_gradients, critic_gradients, alpha_gradient = gradients
         actor_gradients = self.packnet_helper.adjust_gradients(
-            actor_gradients, self.actor.trainable_variables, tf.convert_to_tensor(seq_idx),
+            actor_gradients,
+            self.actor.trainable_variables,
+            tf.convert_to_tensor(seq_idx),
         )
         if self.algo_config.regularize_critic:
             critic_gradients = self.packnet_helper.adjust_gradients(
@@ -106,7 +108,9 @@ class PackNet(SAC, target_setting=TaskIncrementalRLSetting):  # type: ignore
 
             reset_optimizer(self.optimizer)
 
-            for _ in tqdm.tqdm(range(self.algo_config.packnet_retrain_steps), desc="finetuning"):
+            for _ in tqdm.tqdm(
+                range(self.algo_config.packnet_retrain_steps), desc="finetuning"
+            ):
                 batch = self.replay_buffer.sample_batch(self.algo_config.batch_size)
                 self.learn_on_batch(tf.convert_to_tensor(self.current_task_idx), batch)
 

@@ -7,7 +7,7 @@ from sequoia.common.config import Config
 
 class RegMethodTests(SACMethodTests):
     Method: ClassVar[Type[RegMethod]]
-    
+
     non_default_config_values: ClassVar[Dict[str, Any]] = {"cl_reg_coef": 1e-4}
 
     @pytest.fixture

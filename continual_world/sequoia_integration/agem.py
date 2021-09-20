@@ -1,26 +1,49 @@
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Tuple, Optional
 
 import tensorflow as tf
 from continual_world.methods.agem import AgemHelper
 from continual_world.spinup.replay_buffers import EpisodicMemory
 from sequoia.settings.rl.discrete.setting import DiscreteTaskAgnosticRLSetting
-
+from simple_parsing.helpers.hparams.hparam import categorical
 from .base_sac_method import SAC, GradientsTuple, BatchDict
+from logging import getLogger
+
+
+logger = getLogger(__name__)
 
 
 class AGEM(SAC):
+    """Averaged Gradient Episodic Memory method.
+    """
+
+    __citation__ = """
+    @misc{chaudhry2019efficient,
+        title={Efficient Lifelong Learning with A-GEM}, 
+        author={Arslan Chaudhry and Marc'Aurelio Ranzato and Marcus Rohrbach and Mohamed Elhoseiny},
+        year={2019},
+        eprint={1812.00420},
+        archivePrefix={arXiv},
+        primaryClass={cs.LG}
+    }
+    """
+
     @dataclass
     class Config(SAC.Config):
-        episodic_mem_per_task: int = 0
-        episodic_batch_size: int = 0
+        """ Hyper-parameters specific to the AGEM method. """
+
+        episodic_mem_per_task: int = 10_000
+        episodic_batch_size: int = categorical(128, 256, default=128)
 
     def __init__(self, algo_config: "AGEM.Config" = None):
         super().__init__(algo_config=algo_config)
         self.algo_config: AGEM.Config
+        self.episodic_memory: EpisodicMemory
+        self.agem_helper: AgemHelper
 
     def configure(self, setting: DiscreteTaskAgnosticRLSetting) -> None:
         super().configure(setting)
+        # Also create the episodic memory buffer.
         episodic_mem_size = self.algo_config.episodic_mem_per_task * self.num_tasks
         self.episodic_memory = EpisodicMemory(
             obs_dim=self.obs_dim, act_dim=self.act_dim, size=episodic_mem_size
@@ -29,14 +52,28 @@ class AGEM(SAC):
 
     def handle_task_boundary(self, task_id: int, training: bool) -> None:
         super().handle_task_boundary(task_id=task_id, training=training)
-        # NOTE: Moved this to the subclasses.
-        assert self.current_task_idx == task_id
-        if task_id > 0:
+        if task_id > 0 and training:
+            size = self.episodic_memory.size
+            max_size = self.episodic_memory.max_size
+            logger.info(f"Episodic memory buffer has {size}/{max_size} items.")
+            # BUG: Overfilling the buffer raises an AssertionError.
+            # NOTE: The episodic_memory is made to have a capacity that is large enough for at least
+            # one task boundary per task. It's weird that we could encounter this 'full' problem.
+            # TODO: Why/how does the AGEM in their repo know not to overfill this buffer?
             new_episodic_mem = self.replay_buffer.sample_batch(
-                self.algo_config.episodic_mem_per_task
+                self.algo_config.episodic_mem_per_task,
+                # min(self.replay_buffer.size, self.algo_config.episodic_mem_per_task)
             )
+            n_new_items: int = new_episodic_mem["obs1"].shape[0]
+            logger.info(f"Adding {n_new_items} new items to the episodic memory.")
             self.episodic_memory.store_multiple(**new_episodic_mem)
+
+    def on_task_switch(self, task_id: Optional[int]):
+        # NOTE: super().on_task_switch does things first, and then calls self.handle_task_boundary.
+        super().on_task_switch(task_id)
+
         # BUG: Gradients and var don't have the same shape!
+        # TODO: Maybe need to do this after the resetting of the models/variables/etc.
         self.learn_on_batch = tf.function(self.learn_on_batch)
         self.get_gradients = tf.function(self.get_gradients)
 
@@ -68,14 +105,14 @@ class AGEM(SAC):
             done=tf.convert_to_tensor(done),
             episodic_batch=None,
         )
-
-        # Warning: we refer here to the int task_idx in the parent function, not
-        # the passed seq_idx.
-        # TODO: Does that make sense though?
+        # TODO: This is from the original code, but need to clarify this, big time!
+        # > Warning: we refer here to the int task_idx in the parent function, not
+        # > the passed seq_idx.
         if self.current_task_idx > 0:
             if not episodic_batch:
                 raise RuntimeError(
-                    f"Need to pass episodic_batch to `get_gradients` for AGEM. ({self.current_task_idx}, {self.training})"
+                    f"Need to pass episodic_batch to `get_gradients` for AGEM. "
+                    f"({self.current_task_idx}, {self.training})"
                 )
 
             ref_gradients, _ = super().get_gradients(

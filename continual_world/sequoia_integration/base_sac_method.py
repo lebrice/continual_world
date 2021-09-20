@@ -91,13 +91,20 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
 
         # Wether to clear the replay buffer when a task boundary is reached during training.
         reset_buffer_on_task_change: bool = True
-        # Wether to reset the optimzier when a task boundary is reached during training.
+        # Wether to reset the optimizer when a task boundary is reached during training.
         reset_optimizer_on_task_change: bool = True
+        # Wether to reset the critic network when a task boundary is reached during training.
         reset_critic_on_task_change: bool = False
+        # Type of activation to use.
         activation: str = "lrelu"
+        # Wether to use layer normalization.
         use_layer_norm: bool = True
-        # scale_reward: bool = False
+
+        # Wether to scale the reward. NOTE: Was always False by default.
+        scale_reward: bool = False
+
         # div_by_return: bool = False
+
         # Entropy regularization coefficient.
         # (Equivalent to inverse of reward scale in the original SAC paper.)
         # The maximum entropy coefficient α is tuned automatically so that the average standard
@@ -182,7 +189,10 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
         # The arguments to be pased to `self.actor_cl` (the actor class constructor).
         self.actor_kwargs: Dict = {}
         self.critic_kwargs: Dict = {}
+
+        # Index of the current training task, if known.
         self.current_task_idx: int = -1
+
         # self.logger: EpochLogger
         self.replay_buffer: Union[ReplayBuffer, ReservoirReplayBuffer]
 
@@ -228,8 +238,12 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
 
         self.num_tasks = setting.nb_tasks
         self.stationary_context = setting.stationary_context
-        self.nb_tasks_in_train_env = setting.nb_tasks if setting.stationary_context else 1
-        self.nb_tasks_in_valid_env = setting.nb_tasks if setting.stationary_context else 1
+        self.nb_tasks_in_train_env = (
+            setting.nb_tasks if setting.stationary_context else 1
+        )
+        self.nb_tasks_in_valid_env = (
+            setting.nb_tasks if setting.stationary_context else 1
+        )
 
         self.current_task_idx = -1
 
@@ -270,8 +284,14 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
         #     config=dict(**asdict(self.task_config), **asdict(self.algo_config)),
         # )
         # Wether or not we add the task IDS to the observations.
-        self.add_task_ids = setting.task_labels_at_train_time and setting.task_labels_at_test_time
-
+        self.add_task_ids = False
+        # The number of dimensions of the flattened observations.
+        self.obs_dim = np.prod(setting.observation_space.x.shape)
+        if setting.task_labels_at_train_time and setting.task_labels_at_test_time:
+            # The task ids will be concatenated to the observations.
+            # TODO: Actually check that the algos can work without the task ids.
+            self.obs_dim += setting.nb_tasks
+            self.add_task_ids = True
         # TODO: Should we set num_heads to the number of tasks if we don't have task labels? If so,
         # we'd need some kind of task inference mechanism also.
         if not self.add_task_ids:
@@ -299,12 +319,6 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
             # task id to condition the policies, and somehow do task inference..
             self.algo_config.hide_task_id = False
 
-        self.obs_dim = np.prod(setting.observation_space.x.shape)
-        if setting.task_labels_at_train_time and setting.task_labels_at_test_time:
-            # The task ids will be concatenated to the observations.
-            # TODO: Actually check that the algos can work without the task ids.
-            self.obs_dim += setting.nb_tasks
-
         # BUG: (https://github.com/lebrice/Sequoia/issues/240)
         # When setting has nb_tasks=1, it actually has 2 tasks in the env observation space.
         if isinstance(setting.action_space, spaces.Dict):
@@ -325,7 +339,9 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
         np.random.seed(self.task_config.seed)
 
         if self.algo_config.use_popart:
-            assert self.algo_config.multihead_archs, "PopArt works only in the multi-head setup"
+            assert (
+                self.algo_config.multihead_archs
+            ), "PopArt works only in the multi-head setup"
             self.critic_cl = PopArtMlpCritic
         else:
             self.critic_cl = MlpCritic
@@ -348,7 +364,9 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
         if self.auto_alpha:
             # Set either the `log_alpha` or the `all_log_alpha` variable, depending on if we have
             # access to task labels.
-            if not (setting.task_labels_at_train_time and setting.task_labels_at_test_time):
+            if not (
+                setting.task_labels_at_train_time and setting.task_labels_at_test_time
+            ):
                 # IDEA: Use a single value for alpha instead of one value per task, and automatically
                 # train it also.
                 if isinstance(self.algo_config.alpha, str):
@@ -362,7 +380,9 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
                     alpha = 1.0
                 else:
                     alpha = self.algo_config.alpha
-                self.log_alpha = tf.Variable(np.array(alpha).astype(np.float32), trainable=True)
+                self.log_alpha = tf.Variable(
+                    np.array(alpha).astype(np.float32), trainable=True
+                )
             else:
                 self.all_log_alpha = tf.Variable(
                     np.ones((self.num_tasks, 1), dtype=np.float32), trainable=True
@@ -410,7 +430,7 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
         self.current_task_t = 0
 
         obs, ep_ret, ep_len = env.reset(), 0, 0
-
+        postfix = {}
         # Main loop: collect experience in env and update/log each epoch
         epoch_pbar = tqdm(range(steps), desc="Training", position=0)
         for t in epoch_pbar:
@@ -441,6 +461,8 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
             ep_ret += reward
             ep_len += 1
 
+            # postfix.update({"train/return": ep_ret, "train/ep_length": ep_len})
+
             # Ignore the "done" signal if it comes from hitting the time
             # horizon (that is, when it's an artificial terminal signal
             # that isn't based on the agent's state)
@@ -460,6 +482,8 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
                 # print(f"(step {t}): train/ep_length", ep_len)
                 if self.use_wandb:
                     wandb.log({"train/return": ep_ret, "train/ep_length": ep_len})
+                postfix.update({"train/return": ep_ret, "train/ep_length": ep_len})
+                epoch_pbar.set_postfix(postfix)
                 ep_ret, ep_len = 0, 0
                 if t < steps - 1:
                     obs = env.reset()
@@ -495,12 +519,16 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
                         "train/loss_reg": results["reg_loss"],
                         "train/agem_violation": results["agem_violation"],
                     }
-                    epoch_pbar.set_postfix({
-                        "train/loss_pi": float(results["pi_loss"][0]),
-                        "train/loss_q1": float(results["q1_loss"]),
-                        "train/loss_q2": float(results["q2_loss"]),
-                        "train/loss_reg": float(results["reg_loss"][0]),
-                    })
+                    # NOTE: Using scientific notation so they don't move as much.
+                    postfix.update(
+                        {
+                            "train/loss_pi": f"{float(results['pi_loss'][0]):.2e}",
+                            "train/loss_q1": f"{float(results['q1_loss']):.2e}",
+                            "train/loss_q2": f"{float(results['q2_loss']):.2e}",
+                            "train/loss_reg": f"{float(results['reg_loss'][0]):.2e}",
+                        }
+                    )
+                    epoch_pbar.set_postfix(postfix, refresh=False)
                     # pbar.set_postfix(vals)
                     if self.use_wandb:
                         wandb.log(vals)
@@ -519,23 +547,35 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
                                 )
                             else:
                                 assert self.log_alpha is not None
-                                wandb.log({"train/alpha": float(tf.math.exp(self.log_alpha))})
+                                wandb.log(
+                                    {"train/alpha": float(tf.math.exp(self.log_alpha))}
+                                )
                         # if self.critic_cl is PopArtMlpCritic: # (NOTE: using isinstance instead)
                         if isinstance(self.critic1, PopArtMlpCritic):
                             wandb.log(
                                 {
-                                    f"train/popart_mean/{task_id}": self.critic1.moment1[task_id][
+                                    f"train/popart_mean/{task_id}": self.critic1.moment1[
+                                        task_id
+                                    ][
                                         0
                                     ],
-                                    f"train/popart_std/{task_id}": self.critic1.sigma[task_id][0],
+                                    f"train/popart_std/{task_id}": self.critic1.sigma[
+                                        task_id
+                                    ][0],
                                 }
                             )
 
             # End of epoch wrap-up
             if ((t + 1) % self.algo_config.log_every == 0) or (t + 1 == steps):
-                epoch = (t + 1 + self.algo_config.log_every - 1) // self.algo_config.log_every
+                epoch = (
+                    t + 1 + self.algo_config.log_every - 1
+                ) // self.algo_config.log_every
                 self.end_of_epoch(
-                    train_env=env, val_env=val_env, epoch=epoch, t=t, seq_idx=info.get("seq_idx"),
+                    train_env=env,
+                    val_env=val_env,
+                    epoch=epoch,
+                    t=t,
+                    seq_idx=info.get("seq_idx"),
                 )
 
             self.current_task_t += 1
@@ -555,7 +595,7 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
             if self.current_task_idx == -1:
                 dir_prefixes.append("./checkpoints")
             else:
-                dir_prefixes.append("./checkpoints/task{}".format(self.current_task_idx))
+                dir_prefixes.append(f"./checkpoints/task{self.current_task_idx}")
                 if self.current_task_idx == self.num_tasks - 1:
                     dir_prefixes.append("./checkpoints")
 
@@ -633,11 +673,15 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
         # Create experience buffer
         if self.algo_config.buffer_type == "fifo":
             return ReplayBuffer(
-                obs_dim=self.obs_dim, act_dim=self.act_dim, size=self.algo_config.replay_size,
+                obs_dim=self.obs_dim,
+                act_dim=self.act_dim,
+                size=self.algo_config.replay_size,
             )
         elif self.algo_config.buffer_type == "reservoir":
             return ReservoirReplayBuffer(
-                obs_dim=self.obs_dim, act_dim=self.act_dim, size=self.algo_config.replay_size,
+                obs_dim=self.obs_dim,
+                act_dim=self.act_dim,
+                size=self.algo_config.replay_size,
             )
         else:
             raise NotImplementedError(self.algo_config.buffer_type)
@@ -686,7 +730,9 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
         self.target_critic2 = self.critic_cl(**self.critic_kwargs)
         self.target_critic2.set_weights(self.critic2.get_weights())
 
-        self.critic_variables = self.critic1.trainable_variables + self.critic2.trainable_variables
+        self.critic_variables = (
+            self.critic1.trainable_variables + self.critic2.trainable_variables
+        )
         self.all_variables = self.actor.trainable_variables + self.critic_variables
         self.all_common_variables = (
             self.actor.common_variables
@@ -699,11 +745,15 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
         self._last_task_ids = None
 
     def get_actions(
-        self, observations: DiscreteTaskAgnosticRLSetting.Observations, action_space: gym.Space,
+        self,
+        observations: DiscreteTaskAgnosticRLSetting.Observations,
+        action_space: gym.Space,
     ) -> Union[DiscreteTaskAgnosticRLSetting.Actions, Any]:
         # BUG: In TraditionalRLSetting, we get some weird task ids during test time, makes no sense.
         if observations.task_labels != self._last_task_ids:
-            logger.debug(f"New task ids: {observations.task_labels} (obs = {observations})")
+            logger.debug(
+                f"New task ids: {observations.task_labels} (obs = {observations})"
+            )
         if observations.done:
             logger.debug(f"Obs has done=True: {observations}")
         self._last_task_ids = observations.task_labels
@@ -721,7 +771,10 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
 
     # @tf.function(experimental_follow_type_hints=True)
     def learn_on_batch(
-        self, seq_idx: tf.Tensor, batch: BatchDict, episodic_batch: Optional[BatchDict] = None
+        self,
+        seq_idx: tf.Tensor,
+        batch: BatchDict,
+        episodic_batch: Optional[BatchDict] = None,
     ) -> Dict:
         gradients, metrics = self.get_gradients(
             seq_idx=seq_idx,
@@ -770,7 +823,9 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
             return self.log_alpha
 
     @tf.function
-    def get_action(self, obs: tf.Tensor, deterministic: bool = tf.constant(False)) -> tf.Tensor:
+    def get_action(
+        self, obs: tf.Tensor, deterministic: bool = tf.constant(False)
+    ) -> tf.Tensor:
         mu, log_std, pi, logp_pi = self.actor(tf.expand_dims(obs, 0))
         if deterministic:
             return mu[0]
@@ -905,7 +960,9 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
         critic_gradients: List[tf.Tensor],
         alpha_gradient: List[tf.Tensor],
     ):
-        self.optimizer.apply_gradients(zip(actor_gradients, self.actor.trainable_variables))
+        self.optimizer.apply_gradients(
+            zip(actor_gradients, self.actor.trainable_variables)
+        )
         self.optimizer.apply_gradients(zip(critic_gradients, self.critic_variables))
 
         if self.auto_alpha:
@@ -919,11 +976,15 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
         for v, target_v in zip(
             self.critic1.trainable_variables, self.target_critic1.trainable_variables
         ):
-            target_v.assign(self.algo_config.polyak * target_v + (1 - self.algo_config.polyak) * v)
+            target_v.assign(
+                self.algo_config.polyak * target_v + (1 - self.algo_config.polyak) * v
+            )
         for v, target_v in zip(
             self.critic2.trainable_variables, self.target_critic2.trainable_variables
         ):
-            target_v.assign(self.algo_config.polyak * target_v + (1 - self.algo_config.polyak) * v)
+            target_v.assign(
+                self.algo_config.polyak * target_v + (1 - self.algo_config.polyak) * v
+            )
 
     def test_agent(self, test_envs: List[gym.Env]):
         # TODO: parallelize test phase if we hit significant added walltime.
@@ -972,7 +1033,9 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
         mode = "deterministic" if deterministic else "stochastic"
         # NOTE: Changed this next line, since we may be calling this with a single env for task 4
         # for example.
-        metrics: Dict[int, Dict[str, List[float]]] = defaultdict(lambda: defaultdict(list))
+        metrics: Dict[int, Dict[str, List[float]]] = defaultdict(
+            lambda: defaultdict(list)
+        )
         total_steps = 0
         for episode in range(max_episodes) if max_episodes else itertools.count():
             # TODO: The number of test episodes is too large actually! Need to check instead
@@ -1002,7 +1065,9 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
 
                 assert obs is not None
                 obs, reward, done, _ = test_env.step(
-                    self.get_action(tf.convert_to_tensor(obs), tf.constant(deterministic))
+                    self.get_action(
+                        tf.convert_to_tensor(obs), tf.constant(deterministic)
+                    )
                 )
                 total_steps += 1
                 ep_ret += reward
@@ -1036,38 +1101,21 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
         Parameters
         ----------
         task_id : Optional[int]
-            [description]
+            The index of the next task, when that info is available, else None.
         """
         logger.info(
             f"on_task_switch called with task_id = {task_id} (training={self.training}, "
             f"self.current_task_idx={self.current_task_idx})"
         )
-        if self.current_task_idx == task_id:
-            logger.info(
-                f"Ignoring call to `on_task_switch` since task_id ({task_id}) is the same as "
-                f"before ({self.current_task_idx}). (self.training={self.training})."
-            )
-            return
-        else:
-            logger.info(
-                f"Calling handle_task_boundary "
-                f"(self.current_task_idx={self.current_task_idx}, task_id={task_id}"
-            )
-
-        if task_id is None:
-            task_id = -1
-
-        if self.training:
-            # Reset the number of training steps taken in the current task.
-            self.current_task_t = 0
-
-        self.current_task_idx = task_id
-
-        # TODO: Can get a bit complicated to try and give an `old_task` and a `new_task`, because
-        # there are boundaries between test/train in TaskIncrementalRL for example.
+        # TODO: Remove `handle_task_boundary`, instead let the subclasses overwrite this method
+        # directly, since there isn't a block of useful code before this part anymore.
         self.handle_task_boundary(task_id=self.current_task_idx, training=self.training)
 
-        if not self.training:
+        if self.training:
+            # NOTE: should we only update current_task_idx property when training?
+            # or also during testing?
+            self.current_task_idx = task_id if task_id is not None else -1
+        else:
             # Don't do the rest if self.training is False.
             logger.info(
                 "Not resetting the models/buffers/optimizers since task boundary is reached during "
@@ -1075,10 +1123,14 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
             )
             return
 
+        # Reset the number of training steps taken in the current task.
+        self.current_task_t = 0
         if self.algo_config.reset_buffer_on_task_change:
             assert self.algo_config.buffer_type == "fifo"
             self.replay_buffer = ReplayBuffer(
-                obs_dim=self.obs_dim, act_dim=self.act_dim, size=self.algo_config.replay_size,
+                obs_dim=self.obs_dim,
+                act_dim=self.act_dim,
+                size=self.algo_config.replay_size,
             )
 
         if self.algo_config.reset_critic_on_task_change:
@@ -1105,9 +1157,11 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
     def handle_task_boundary(self, task_id: int, training: bool) -> None:
         """Hook added for the subclasses of SAC, to customize what they want to do when a task
         boundary is reached.
-        
-        NOTE: This is necessary because we have some things we want to do both before and after this
-        block of code.
+
+        NOTE: It isn't really necessary for this to be its own method. Could be removed and just let
+        the subclasses overwrite just `on_task_switch`.
+        Another possibility would be to move the 'buffer clearing' logic to another callback or
+        something similar.
 
         Parameters
         ----------
@@ -1119,15 +1173,13 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
         pass
 
     @classmethod
-    def add_argparse_args(cls, parser: ArgumentParser, dest: str = "") -> None:
+    def add_argparse_args(cls, parser: ArgumentParser) -> None:
         # TODO: Use the values from `defaults.py` depending on what kind of Setting we need to set
         # arguments for. (Also need to detect the setting type on which this is going to be used!)
-        prefix = f"{dest}." if dest else ""
-        parser.add_arguments(cls.Config, f"{prefix}algo_config")
+        parser.add_arguments(cls.Config, dest="algo_config")
 
     @classmethod
-    def from_argparse_args(cls, args: Namespace, dest: str = ""):
-        args = getattr(args, dest) if dest else args
+    def from_argparse_args(cls, args: Namespace):
         algo_config: SAC.Config = getattr(args, "algo_config")
         return cls(algo_config=algo_config)
 

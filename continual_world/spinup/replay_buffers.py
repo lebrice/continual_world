@@ -27,6 +27,8 @@ class ReplayBuffer:
     self.size = min(self.size + 1, self.max_size)
 
   def sample_batch(self, batch_size: int) -> BatchDict:
+    # TODO: What to do if the `batch_size` is larger than self.size?
+    # NOTE: This doesn't happen in the CW10/CW20 case, since each task has 1M steps.
     idxs = np.random.randint(0, self.size, size=batch_size)
     return dict(obs1=tf.convert_to_tensor(self.obs1_buf[idxs]),
                 obs2=tf.convert_to_tensor(self.obs2_buf[idxs]),
@@ -40,7 +42,7 @@ class EpisodicMemory:
   Buffer which does not support overwriting old samples
   """
 
-  def __init__(self, obs_dim, act_dim, size):
+  def __init__(self, obs_dim: int, act_dim: int, size: int):
     self.obs1_buf = np.zeros([size, obs_dim], dtype=np.float32)
     self.obs2_buf = np.zeros([size, obs_dim], dtype=np.float32)
     self.acts_buf = np.zeros([size, act_dim], dtype=np.float32)

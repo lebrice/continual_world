@@ -72,7 +72,9 @@ def test_get_random_performance_fixture(
     # used for this test.
     get_random_performance._cache.clear()  # type: ignore
 
+
 from continual_world.defaults import CL_DEFAULTS
+
 
 class TestSACMethod(MethodTests):
     Method: ClassVar[Type[SAC]] = SAC
@@ -87,7 +89,7 @@ class TestSACMethod(MethodTests):
     get_random_performance = staticmethod(get_random_performance)
 
     non_default_config_values: ClassVar[Dict[str, Any]] = {}
-    
+
     def test_values_match_default(self):
         config = self.Method.Config()
         for key, default_value in CL_DEFAULTS.items():
@@ -145,7 +147,9 @@ class TestSACMethod(MethodTests):
         # long.
         # BUG: The epoch logger doesn't get to store any metrics, which causes an IndexError when
         # `self.log_tabular` is called.
-        algo_config = self.Method.Config(start_steps=50, update_after=50, update_every=100)
+        algo_config = self.Method.Config(
+            start_steps=50, update_after=50, update_every=100
+        )
         return self.Method(algo_config=algo_config)
 
     def test_debug(
@@ -194,4 +198,3 @@ class TestSACMethod(MethodTests):
 
     def test_get_search_space(self):
         pass
-
