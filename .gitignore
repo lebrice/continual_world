@@ -147,3 +147,8 @@ Pipfile.lock
 
 # Mujoco license key
 mjkey.txt
+
+# @lebrice: Adding these for when running experiments with Sequoia.
+results
+checkpoints
+temp
