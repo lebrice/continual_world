@@ -247,7 +247,7 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
 
         self.current_task_idx = -1
 
-        if setting.wandb:
+        if setting.wandb and setting.wandb.project:
             self.use_wandb = True
         else:
             self.use_wandb = False
