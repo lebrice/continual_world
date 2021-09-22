@@ -18,7 +18,7 @@ def _dict_to_numpy(v: Dict) -> Dict:
 
 def average_metrics(list_of_dicts: List[Dict[str, np.ndarray]]) -> Dict[str, np.ndarray]:
     dict_of_lists = defaultdict(list)
-    for log_dict in self.log_queue:
+    for log_dict in list_of_dicts:
         for k, v in log_dict.items():
             dict_of_lists[k].append(v)
     concat_values = { 
