@@ -1,12 +1,14 @@
-from typing import Any, Callable, ClassVar, Dict, Tuple, Type
+import logging
 from dataclasses import asdict
+from typing import Any, Callable, ClassVar, Dict, Tuple, Type
+
 import pytest
 from sequoia.common.config import Config
 from sequoia.methods.method_test import MethodTests, MethodType
+from sequoia.methods.random_baseline import RandomBaselineMethod
 from sequoia.settings.rl import RLSetting
 from sequoia.settings.rl.incremental.setting import IncrementalRLSetting
-from sequoia.methods.random_baseline import RandomBaselineMethod
-import logging
+from simple_parsing import ArgumentParser
 
 from .base_sac_method import SAC
 
@@ -78,7 +80,7 @@ from continual_world.defaults import CL_DEFAULTS
 
 class TestSACMethod(MethodTests):
     Method: ClassVar[Type[SAC]] = SAC
-    setting_kwargs: ClassVar[Dict[str, str]] = {
+    setting_kwargs: ClassVar[Dict[str, Any]] = {
         "dataset": "MountainCarContinuous-v0",
         "train_max_steps": 1_000,
         "max_episode_steps": 100,
@@ -147,9 +149,7 @@ class TestSACMethod(MethodTests):
         # long.
         # BUG: The epoch logger doesn't get to store any metrics, which causes an IndexError when
         # `self.log_tabular` is called.
-        algo_config = self.Method.Config(
-            start_steps=50, update_after=50, update_every=100
-        )
+        algo_config = self.Method.Config(start_steps=50, update_after=50, update_every=100)
         return self.Method(algo_config=algo_config)
 
     def test_debug(
@@ -187,13 +187,10 @@ class TestSACMethod(MethodTests):
         # return super().validate_results(setting, method, results)
 
     def test_from_args(self):
-        from simple_parsing import ArgumentParser
-        import shlex
-
         parser = ArgumentParser()
-        self.Method.add_argparse_args(parser, dest="")
+        self.Method.add_argparse_args(parser)
         args = parser.parse_args([])
-        method = self.Method.from_argparse_args(args, dest="")
+        method = self.Method.from_argparse_args(args)
         assert isinstance(method, self.Method)
 
     def test_get_search_space(self):

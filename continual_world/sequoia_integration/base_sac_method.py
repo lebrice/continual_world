@@ -7,36 +7,21 @@ become methods.
 IDEA: Could also perhaps create these `Method` classes inside `continual_world/methods`, and then
 later add the necessary wrapping around them so that they can be used by Sequoia.
 """
-import itertools
 import logging
 import math
 import os
 import random
 import time
-from argparse import Namespace
-from collections import defaultdict
-from dataclasses import asdict, dataclass
-from typing import Any, ClassVar, Dict, List, Optional, Tuple, Type, Union
 import warnings
+from argparse import Namespace
+from collections import defaultdict, deque
+from dataclasses import asdict, dataclass
+from typing import Any, ClassVar, Deque, Dict, List, Optional, Tuple, Type, Union
 
 import gym
 import numpy as np
-from sequoia.common.config.wandb_config import WandbConfig
 import tensorflow as tf
-
-from continual_world.spinup.models import Actor, MlpActor, MlpCritic, PopArtMlpCritic
-from continual_world.config import AlgoConfig, TaskConfig
-from continual_world.spinup.replay_buffers import (
-    ReplayBuffer,
-    ReservoirReplayBuffer,
-)
-from continual_world.spinup.utils.logx import EpochLogger
-from continual_world.utils.utils import (
-    get_activation_from_str,
-    reset_optimizer,
-    reset_weights,
-    sci2int,
-)
+import wandb
 from gym import spaces
 from sequoia.common.spaces.typed_dict import TypedDictSpace
 from sequoia.methods import Method
@@ -48,21 +33,31 @@ from simple_parsing import ArgumentParser
 from simple_parsing.helpers import choice, field, list_field
 from simple_parsing.helpers.hparams import categorical
 from simple_parsing.helpers.hparams.hyperparameters import HyperParameters
-from continual_world.spinup.objects import BatchDict, GradientsTuple
 from tqdm import tqdm
-import wandb
 from wandb.wandb_run import Run
+
+from continual_world.sequoia_integration.utils import average_metrics, to_numpy
+from continual_world.config import TaskConfig
 from continual_world.sequoia_integration.wrappers import (
     SequoiaToCWWrapper,
     concat_x_and_t,
     wrap_sequoia_env,
 )
+from continual_world.spinup.models import Actor, MlpActor, MlpCritic, PopArtMlpCritic
+from continual_world.spinup.objects import BatchDict, GradientsTuple
+from continual_world.spinup.replay_buffers import ReplayBuffer, ReservoirReplayBuffer
+from continual_world.utils.utils import (
+    get_activation_from_str,
+    reset_optimizer,
+    reset_weights,
+    sci2int,
+)
+
 
 try:
     from typing import Literal  # type: ignore
 except ImportError:
     from typing_extensions import Literal  # type: ignore
-
 
 logger = logging.getLogger(__name__)
 
@@ -159,11 +154,14 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
         # How often (in terms of gap between epochs) to save the current policy and value function.
         save_freq_epochs: int = 100
         # Types of logger used.
+        # NOTE: In this adapted implementation, this option is ignored. Only Wandb is used, if the
+        # setting also uses it.
         logger_output: List[Literal["neptune", "tensorboard", "tsv"]] = choice(  # type: ignore
             "neptune", "tensorboard", "tsv", default_factory=["tsv", "tensorboard"].copy
         )
         # How often to log statistics (in terms of steps).
-        log_every: int = 20_000
+        # NOTE: This is also the 'epoch length'.
+        log_every: int = 10_000
 
     def __init__(self, algo_config: "SAC.Config" = None):
         super().__init__()
@@ -216,6 +214,8 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
         # Wether the tasks follow some non-stationary distribution, or if they are uniformly sampled
         self.stationary_context: bool = False
 
+        self.log_queue: Deque[Dict[str, np.ndarray]]
+
     def configure(self, setting: DiscreteTaskAgnosticRLSetting) -> None:
         """ Configure the Method before training begins on the envs of the Setting. """
         # IDEA: Copy over the info from the setting into the `TaskConfig` class which contains the
@@ -238,12 +238,8 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
 
         self.num_tasks = setting.nb_tasks
         self.stationary_context = setting.stationary_context
-        self.nb_tasks_in_train_env = (
-            setting.nb_tasks if setting.stationary_context else 1
-        )
-        self.nb_tasks_in_valid_env = (
-            setting.nb_tasks if setting.stationary_context else 1
-        )
+        self.nb_tasks_in_train_env = setting.nb_tasks if setting.stationary_context else 1
+        self.nb_tasks_in_valid_env = setting.nb_tasks if setting.stationary_context else 1
 
         self.current_task_idx = -1
 
@@ -279,6 +275,14 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
                 )
             )
 
+        if self.algo_config.log_every > setting.steps_per_phase // 10:
+            # we want at least 10 'epochs' per "phase" (i.e. task, except in stationary settings).
+            self.algo_config.log_every = setting.steps_per_phase // 10
+            warnings.warn(
+                RuntimeWarning(f"Reducing algo_config.log_every to {self.algo_config.log_every}")
+            )
+
+        # NOTE: Disabling this EpochLogger for now, using wandb instead.
         # self.logger = EpochLogger(
         #     self.algo_config.logger_output,
         #     config=dict(**asdict(self.task_config), **asdict(self.algo_config)),
@@ -339,9 +343,7 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
         np.random.seed(self.task_config.seed)
 
         if self.algo_config.use_popart:
-            assert (
-                self.algo_config.multihead_archs
-            ), "PopArt works only in the multi-head setup"
+            assert self.algo_config.multihead_archs, "PopArt works only in the multi-head setup"
             self.critic_cl = PopArtMlpCritic
         else:
             self.critic_cl = MlpCritic
@@ -364,9 +366,7 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
         if self.auto_alpha:
             # Set either the `log_alpha` or the `all_log_alpha` variable, depending on if we have
             # access to task labels.
-            if not (
-                setting.task_labels_at_train_time and setting.task_labels_at_test_time
-            ):
+            if not (setting.task_labels_at_train_time and setting.task_labels_at_test_time):
                 # IDEA: Use a single value for alpha instead of one value per task, and automatically
                 # train it also.
                 if isinstance(self.algo_config.alpha, str):
@@ -380,9 +380,7 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
                     alpha = 1.0
                 else:
                     alpha = self.algo_config.alpha
-                self.log_alpha = tf.Variable(
-                    np.array(alpha).astype(np.float32), trainable=True
-                )
+                self.log_alpha = tf.Variable(np.array(alpha).astype(np.float32), trainable=True)
             else:
                 self.all_log_alpha = tf.Variable(
                     np.ones((self.num_tasks, 1), dtype=np.float32), trainable=True
@@ -406,7 +404,6 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
         valid_env : gym.Env
             Validation environment.
         """
-        steps = train_env.max_steps
         env: SequoiaToCWWrapper = wrap_sequoia_env(
             train_env,
             nb_tasks_in_env=self.nb_tasks_in_train_env,
@@ -427,24 +424,28 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
         val_env.action_space.seed(self.task_config.seed)
 
         self.start_time = time.time()
-        self.current_task_t = 0
+        # NOTE: Not ideal: Get the max number of steps from the env.
+        max_steps = env.max_steps
+
+        # --- previous stuff ----
 
         obs, ep_ret, ep_len = env.reset(), 0, 0
-        postfix = {}
-        # Main loop: collect experience in env and update/log each epoch
-        epoch_pbar = tqdm(range(steps), desc="Training", position=0)
-        for t in epoch_pbar:
-            # NOTE: Moving this 'on task change' to `on_task_switch`.
-            # TODO: This might actually make some sense, if we consider multi-task and traditional
-            # envs, which will change tasks always. However, the task distribution is nonstationary
-            # at train time, so we'd be better off just considering all tasks as being the same, no?
+        epoch_pbar_postfix: Dict[str, Union[str, int, float]] = {}
+        # NOTE: This might be a bit too large, we'll see.
+        log_queue_max_length = self.algo_config.log_every
+        self.log_queue: Deque[Dict[str, List]] = deque(maxlen=log_queue_max_length)
 
+        # Main loop: collect experience in env and update/log each epoch
+        epoch_pbar = tqdm(range(max_steps), desc="Training", position=0)
+        for self.current_task_t in epoch_pbar:
             # NOTE: Not doing this for now, because we don't want to call `on_task_switch` when in a
             # stationary context, and we also expect to have `on_task_switch` be called by the
             # Setting anyways if the task ids are available.
             # task_id = getattr(env, "cur_seq_idx", -1)
             # if self.current_task_idx != task_id:
             #     self.on_task_switch(task_id)
+
+            at_last_step: bool = self.current_task_t + 1 == max_steps
 
             # Until start_steps have elapsed, randomly sample actions
             # from a uniform distribution for better exploration. Afterwards,
@@ -476,16 +477,19 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
             # Super critical, easy to overlook step: make sure to update
             # most recent observation!
             obs = next_obs
-            # End of trajectory handling
+
+            # End of episode/trajectory handling
             if done or (ep_len == self.task_config.max_ep_len):
                 # print(f"(step {t}): train/return", ep_ret)
                 # print(f"(step {t}): train/ep_length", ep_len)
                 if self.use_wandb:
                     wandb.log({"train/return": ep_ret, "train/ep_length": ep_len})
-                postfix.update({"train/return": ep_ret, "train/ep_length": ep_len})
-                epoch_pbar.set_postfix(postfix)
+                # Update what the progress bar is showing:
+                epoch_pbar_postfix.update({"train/return": ep_ret, "train/ep_length": ep_len})
+                epoch_pbar.set_postfix(epoch_pbar_postfix)
+
                 ep_ret, ep_len = 0, 0
-                if t < steps - 1:
+                if not at_last_step:
                     obs = env.reset()
 
             # Update handling
@@ -495,21 +499,22 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
             ):
                 # NOTE: @lebrice: Interesting: Perform one update per step, even when `update_every`
                 # is an interval, i.e. "perform 50 updates every 50 steps".
-
-                pbar = tqdm(
+                update_pbar = tqdm(
                     range(self.algo_config.update_every),
                     desc="Updating the model",
                     position=1,
                     leave=False,
                 )
-                for update_step in pbar:
+
+                update_metrics: List[Dict[str, np.ndarray]] = []
+                for update_step in update_pbar:
                     batch, episodic_batch = self.sample_batches()
                     results = self.learn_on_batch(
                         seq_idx=tf.convert_to_tensor(self.current_task_idx),
                         batch=batch,
                         episodic_batch=episodic_batch,
                     )
-                    vals = {
+                    metrics: Dict[str, tf.Tensor] = {
                         "train/q1_vals": results["q1"],
                         "train/q2_vals": results["q2"],
                         "train/log_pi": results["logp_pi"],
@@ -519,8 +524,9 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
                         "train/loss_reg": results["reg_loss"],
                         "train/agem_violation": results["agem_violation"],
                     }
+
                     # NOTE: Using scientific notation so they don't move as much.
-                    postfix.update(
+                    epoch_pbar_postfix.update(
                         {
                             "train/loss_pi": f"{float(results['pi_loss'][0]):.2e}",
                             "train/loss_q1": f"{float(results['q1_loss']):.2e}",
@@ -528,141 +534,138 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
                             "train/loss_reg": f"{float(results['reg_loss'][0]):.2e}",
                         }
                     )
-                    epoch_pbar.set_postfix(postfix, refresh=False)
-                    # pbar.set_postfix(vals)
-                    if self.use_wandb:
-                        wandb.log(vals)
+                    epoch_pbar.set_postfix(epoch_pbar_postfix, refresh=False)
 
-                    for task_id in range(self.num_tasks):
-                        if not self.use_wandb:
-                            continue
-                        if self.auto_alpha:
-                            if self.all_log_alpha is not None:
-                                wandb.log(
-                                    {
-                                        f"train/alpha/{task_id}": float(
-                                            tf.math.exp(self.all_log_alpha[task_id][0])
-                                        )
-                                    }
-                                )
-                            else:
-                                assert self.log_alpha is not None
-                                wandb.log(
-                                    {"train/alpha": float(tf.math.exp(self.log_alpha))}
-                                )
-                        # if self.critic_cl is PopArtMlpCritic: # (NOTE: using isinstance instead)
-                        if isinstance(self.critic1, PopArtMlpCritic):
-                            wandb.log(
-                                {
-                                    f"train/popart_mean/{task_id}": self.critic1.moment1[
-                                        task_id
-                                    ][
-                                        0
-                                    ],
-                                    f"train/popart_std/{task_id}": self.critic1.sigma[
-                                        task_id
-                                    ][0],
-                                }
-                            )
+                    if self.auto_alpha:
+                        if self.all_log_alpha is not None:
+                            for task_id in range(self.num_tasks):
+                                task_log_alpha = self.all_log_alpha[task_id][0]
+                                metrics[f"train/alpha/{task_id}"] = tf.math.exp(task_log_alpha)
+                        else:
+                            assert self.log_alpha is not None
+                            metrics["train/alpha"] = tf.math.exp(self.log_alpha)
+
+                    if isinstance(self.critic1, PopArtMlpCritic):
+                        # metrics[f"train/popart_mean/{task_id}"] = self.critic1.moment1[task_id][0]
+                        # metrics[f"train/popart_std/{task_id}"] = self.critic1.sigma[task_id][0]
+                        metrics[f"train/popart_mean"] = self.critic1.moment1
+                        metrics[f"train/popart_std"] = self.critic1.sigma
+
+                    if self.use_wandb:
+                        update_metrics.append(to_numpy(metrics))
+
+                if self.use_wandb:
+                    # Average out the metrics from each update and log them to wandb?
+                    average_update_metrics = average_metrics(update_metrics)
+                    wandb.log(average_update_metrics)
 
             # End of epoch wrap-up
-            if ((t + 1) % self.algo_config.log_every == 0) or (t + 1 == steps):
+            if ((self.current_task_t + 1) % self.algo_config.log_every == 0) or at_last_step:
                 epoch = (
-                    t + 1 + self.algo_config.log_every - 1
+                    self.current_task_t + self.algo_config.log_every
                 ) // self.algo_config.log_every
-                self.end_of_epoch(
-                    train_env=env,
-                    val_env=val_env,
-                    epoch=epoch,
-                    t=t,
-                    seq_idx=info.get("seq_idx"),
-                )
 
-            self.current_task_t += 1
+                print(f"Epoch {epoch} (self.current_task_t = {self.current_task_t})")
+                if self.use_wandb:
+                    wandb.log({"epoch": epoch})
+                    wandb.log({"current_task_t": self.current_task_t})
 
-    def end_of_epoch(
-        self,
-        train_env: SequoiaToCWWrapper,
-        val_env: SequoiaToCWWrapper,
-        epoch: int,
-        t: int,
-        seq_idx: int = None,
-    ):
-        # Save model
-        steps = train_env.max_steps
-        if (epoch % self.algo_config.save_freq_epochs == 0) or (t + 1 == steps):
-            dir_prefixes = []
-            if self.current_task_idx == -1:
-                dir_prefixes.append("./checkpoints")
-            else:
-                dir_prefixes.append(f"./checkpoints/task{self.current_task_idx}")
-                if self.current_task_idx == self.num_tasks - 1:
-                    dir_prefixes.append("./checkpoints")
+                # Evaluation loop:
+                # NOTE: Could be interesting to add some kind of early stopping here!
+                successes_per_mode: Dict[bool, List[bool]] = defaultdict(list)
+                for deterministic, max_episodes in [
+                    (False, self.task_config.num_test_eps_stochastic),
+                    (True, self.task_config.num_test_eps_deterministic),
+                ]:
+                    # Run a given number of episodes on the validation env and collect the average
+                    # success and some other metrics.
+                    env_successes, task_metrics = self.test_agent_on_env(
+                        val_env, deterministic=deterministic, max_episodes=max_episodes
+                    )
+                    successes_per_mode[deterministic].extend(env_successes)
+                    average_metrics_per_task: Dict[int, Dict[str, float]] = {
+                        task_id: {k: float(np.mean(v)) for k, v in task_metrics_dict.items()}
+                        for task_id, task_metrics_dict in task_metrics.items()
+                    }
 
-            for prefix in dir_prefixes:
-                self.actor.save_weights(os.path.join(prefix, "actor"))
-                self.critic1.save_weights(os.path.join(prefix, "critic1"))
-                self.target_critic1.save_weights(os.path.join(prefix, "target_critic1"))
-                self.critic2.save_weights(os.path.join(prefix, "critic2"))
-                self.target_critic2.save_weights(os.path.join(prefix, "target_critic2"))
+                    # Log the test metrics for each task (if they are known).
+                    for task_id, average_metrics_dict in average_metrics_per_task.items():
+                        prefix = "valid/" + (f"Task {task_id}/" if task_id != -1 else "")
+                        mode = "deterministic" if deterministic else "stochastic"
+                        suffix = f"/{mode}"
+                        metrics_dict = {
+                            prefix + k + suffix: value for k, value in average_metrics_dict.items()
+                        }
 
-        # Test the performance of the deterministic version of the agent.
-        # TODO: Seems like some of the values that are required by the `log_tabular` calls
-        # below aren't being generated in the test_agent!
-        # TODO: Fix this by re-adding the logging of the test metrics.
-        # successes, task_metrics = self.test_agent_on_env(
-        #     val_env,
-        #     deterministic=False,
-        #     max_episodes=self.task_config.num_test_eps_stochastic,
-        # )
-        self.test_agent([val_env])
+                        # Print out the metrics to the console
+                        print(
+                            f"Validation performance (mode={mode})"
+                            + (f" on task {task_id}:" if task_id != -1 else ":")
+                        )
+                        for k, value in metrics_dict.items():
+                            print(f"\t{k}: {value}")
 
-        if self.use_wandb:
-            # Log info about epoch
-            wandb.log({"epoch": epoch})
-            # BUG: Not getting a value stored in `train/return` because it seems like an
-            # end-of-episode (done=True) isn't achieved in the current test setup.
-            # self.logger.log_tabular("train/return", with_min_and_max=True)
-            # self.logger.log_tabular("train/ep_length", average_only=True)
-            wandb.log({"total_env_steps": t + 1})
-            wandb.log({"current_task_steps": self.current_task_t + 1})
-            # self.logger.log_tabular("train/q1_vals", with_min_and_max=True)
-            # self.logger.log_tabular("train/q2_vals", with_min_and_max=True)
-            # self.logger.log_tabular("train/log_pi", with_min_and_max=True)
-            # self.logger.log_tabular("train/loss_pi", average_only=True)
-            # self.logger.log_tabular("train/loss_q1", average_only=True)
-            # self.logger.log_tabular("train/loss_q2", average_only=True)
-            if self.auto_alpha and self.log_alpha is not None:
-                assert self.log_alpha is not None
-                wandb.log({"train/log_alpha": self.log_alpha})
-                # self.logger.log_tabular(
-                #     "train/alpha", average_only=True,  # val=self.log_alpha
+                        if self.use_wandb:
+                            wandb.log(metrics_dict)
+
+                    # #self.logger.log_tabular(f"{prefix}/return", with_min_and_max=True)
+                    # #self.logger.log_tabular(f"{prefix}/ep_length", average_only=True)
+
+                print(f"Average success:")
+                for deterministic, successes in successes_per_mode.items():
+                    mode = "deterministic" if deterministic else "stochastic"
+                    prefix = "valid/" + (f"Task {task_id}/" if task_id != -1 else "")
+                    suffix = f"/{mode}"
+                    success_ratio = np.mean(successes)
+                    key = prefix + "average_success" + suffix
+                    success_dict = {key: success_ratio}
+                    print(f"\t{key}: {success_ratio:.2%}")
+
+                    if self.use_wandb:
+                        wandb.log(success_dict)
+
+                # NOTE We assume here that SuccessCounter is outermost wrapper.
+                avg_success = np.mean(env.pop_successes())
+                if self.use_wandb:
+                    wandb.log({"train/average_success": avg_success})
+                    wandb.log({"current_task_idx": self.current_task_idx})
+                    wandb.log({"walltime": time.time() - self.start_time})
+
+                # 'hook' for saving the models
+                if (epoch % self.algo_config.save_freq_epochs == 0) or at_last_step:
+                    dir_prefixes = []
+                    if self.current_task_idx == -1:
+                        dir_prefixes.append("./checkpoints")
+                    else:
+                        dir_prefixes.append(f"./checkpoints/task{self.current_task_idx}")
+                        if self.current_task_idx == self.num_tasks - 1:
+                            dir_prefixes.append("./checkpoints")
+
+                    for prefix in dir_prefixes:
+                        print(f"Saving networks under dir {prefix}")
+                        self.actor.save_weights(os.path.join(prefix, "actor"))
+                        self.critic1.save_weights(os.path.join(prefix, "critic1"))
+                        self.target_critic1.save_weights(os.path.join(prefix, "target_critic1"))
+                        self.critic2.save_weights(os.path.join(prefix, "critic2"))
+                        self.target_critic2.save_weights(os.path.join(prefix, "target_critic2"))
+
+                # self.end_of_epoch(
+                #     train_env=env,
+                #     val_env=val_env,
+                #     epoch=epoch,
+                #     t=self.current_task_t,
+                #     seq_idx=info.get("seq_idx"),
                 # )
-        for task_id in range(self.num_tasks):
-            if self.auto_alpha:
-                if self.all_log_alpha is not None:
-                    pass
-                    # self.logger.log_tabular(f"train/alpha/{task_id}", average_only=True)
 
-            # if self.critic_cl is PopArtMlpCritic:
-            if isinstance(self.critic1, PopArtMlpCritic):
-                pass
-                # self.logger.log_tabular(f"train/popart_mean/{task_id}", average_only=True)
-                # self.logger.log_tabular(f"train/popart_std/{task_id}", average_only=True)
-        # self.logger.log_tabular("train/loss_reg", average_only=True)
-        # self.logger.log_tabular("train/agem_violation", average_only=True)
-
-        # TODO: We assume here that SuccessCounter is outermost wrapper.
-        avg_success = np.mean(train_env.pop_successes())
-        if self.use_wandb:
-            wandb.log({"train/success": avg_success})
-            if seq_idx is not None:
-                pass
-                wandb.log({f"train/active_env": seq_idx})
-                # self.logger.log_tabular("train/active_env", seq_idx)
-            wandb.log({"walltime": time.time() - self.start_time})
-        # self.logger.log_tabular("walltime", time.time() - self.start_time)
-        # self.logger.dump_tabular()
+    # def end_of_epoch(
+    #     self,
+    #     train_env: SequoiaToCWWrapper,
+    #     val_env: SequoiaToCWWrapper,
+    #     epoch: int,
+    #     t: int,
+    #     seq_idx: int = None,
+    # ):
+    #     # Save model
 
     def sample_batches(self) -> Tuple[BatchDict, Optional[BatchDict]]:
         batch = self.replay_buffer.sample_batch(self.algo_config.batch_size)
@@ -673,15 +676,11 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
         # Create experience buffer
         if self.algo_config.buffer_type == "fifo":
             return ReplayBuffer(
-                obs_dim=self.obs_dim,
-                act_dim=self.act_dim,
-                size=self.algo_config.replay_size,
+                obs_dim=self.obs_dim, act_dim=self.act_dim, size=self.algo_config.replay_size,
             )
         elif self.algo_config.buffer_type == "reservoir":
             return ReservoirReplayBuffer(
-                obs_dim=self.obs_dim,
-                act_dim=self.act_dim,
-                size=self.algo_config.replay_size,
+                obs_dim=self.obs_dim, act_dim=self.act_dim, size=self.algo_config.replay_size,
             )
         else:
             raise NotImplementedError(self.algo_config.buffer_type)
@@ -730,9 +729,7 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
         self.target_critic2 = self.critic_cl(**self.critic_kwargs)
         self.target_critic2.set_weights(self.critic2.get_weights())
 
-        self.critic_variables = (
-            self.critic1.trainable_variables + self.critic2.trainable_variables
-        )
+        self.critic_variables = self.critic1.trainable_variables + self.critic2.trainable_variables
         self.all_variables = self.actor.trainable_variables + self.critic_variables
         self.all_common_variables = (
             self.actor.common_variables
@@ -745,15 +742,11 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
         self._last_task_ids = None
 
     def get_actions(
-        self,
-        observations: DiscreteTaskAgnosticRLSetting.Observations,
-        action_space: gym.Space,
+        self, observations: DiscreteTaskAgnosticRLSetting.Observations, action_space: gym.Space,
     ) -> Union[DiscreteTaskAgnosticRLSetting.Actions, Any]:
         # BUG: In TraditionalRLSetting, we get some weird task ids during test time, makes no sense.
         if observations.task_labels != self._last_task_ids:
-            logger.debug(
-                f"New task ids: {observations.task_labels} (obs = {observations})"
-            )
+            logger.debug(f"New task ids: {observations.task_labels} (obs = {observations})")
         if observations.done:
             logger.debug(f"Obs has done=True: {observations}")
         self._last_task_ids = observations.task_labels
@@ -771,10 +764,7 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
 
     # @tf.function(experimental_follow_type_hints=True)
     def learn_on_batch(
-        self,
-        seq_idx: tf.Tensor,
-        batch: BatchDict,
-        episodic_batch: Optional[BatchDict] = None,
+        self, seq_idx: tf.Tensor, batch: BatchDict, episodic_batch: Optional[BatchDict] = None,
     ) -> Dict:
         gradients, metrics = self.get_gradients(
             seq_idx=seq_idx,
@@ -823,9 +813,7 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
             return self.log_alpha
 
     @tf.function
-    def get_action(
-        self, obs: tf.Tensor, deterministic: bool = tf.constant(False)
-    ) -> tf.Tensor:
+    def get_action(self, obs: tf.Tensor, deterministic: bool = tf.constant(False)) -> tf.Tensor:
         mu, log_std, pi, logp_pi = self.actor(tf.expand_dims(obs, 0))
         if deterministic:
             return mu[0]
@@ -960,9 +948,7 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
         critic_gradients: List[tf.Tensor],
         alpha_gradient: List[tf.Tensor],
     ):
-        self.optimizer.apply_gradients(
-            zip(actor_gradients, self.actor.trainable_variables)
-        )
+        self.optimizer.apply_gradients(zip(actor_gradients, self.actor.trainable_variables))
         self.optimizer.apply_gradients(zip(critic_gradients, self.critic_variables))
 
         if self.auto_alpha:
@@ -976,15 +962,11 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
         for v, target_v in zip(
             self.critic1.trainable_variables, self.target_critic1.trainable_variables
         ):
-            target_v.assign(
-                self.algo_config.polyak * target_v + (1 - self.algo_config.polyak) * v
-            )
+            target_v.assign(self.algo_config.polyak * target_v + (1 - self.algo_config.polyak) * v)
         for v, target_v in zip(
             self.critic2.trainable_variables, self.target_critic2.trainable_variables
         ):
-            target_v.assign(
-                self.algo_config.polyak * target_v + (1 - self.algo_config.polyak) * v
-            )
+            target_v.assign(self.algo_config.polyak * target_v + (1 - self.algo_config.polyak) * v)
 
     def test_agent(self, test_envs: List[gym.Env]):
         # TODO: parallelize test phase if we hit significant added walltime.
@@ -997,7 +979,7 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
         for deterministic, max_episodes in [
             (False, self.task_config.num_test_eps_stochastic),
             (True, self.task_config.num_test_eps_deterministic),
-            (True, None),
+            # (True, None),
         ]:
             for test_env in test_envs:
                 env_successes, task_metrics = self.test_agent_on_env(
@@ -1028,16 +1010,17 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
         pass
 
     def test_agent_on_env(
-        self, test_env: gym.Env, deterministic: bool, max_episodes: int = None,
+        self, test_env: gym.Env, deterministic: bool, max_episodes: int,
     ) -> Tuple[List[bool], Dict[int, Dict[str, List[float]]]]:
         mode = "deterministic" if deterministic else "stochastic"
         # NOTE: Changed this next line, since we may be calling this with a single env for task 4
         # for example.
-        metrics: Dict[int, Dict[str, List[float]]] = defaultdict(
-            lambda: defaultdict(list)
-        )
+        metrics: Dict[int, Dict[str, List[float]]] = defaultdict(lambda: defaultdict(list))
         total_steps = 0
-        for episode in range(max_episodes) if max_episodes else itertools.count():
+        assert max_episodes is not None
+
+        test_pbar = tqdm(range(max_episodes), desc="Test episodes", leave=False)
+        for episode in test_pbar:
             # TODO: The number of test episodes is too large actually! Need to check instead
             # the `max_steps` property.
             truncated = False
@@ -1064,10 +1047,10 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
                     break
 
                 assert obs is not None
+                obs_tensor = tf.convert_to_tensor(obs)
+                deterministic_tensor = tf.convert_to_tensor(deterministic)
                 obs, reward, done, _ = test_env.step(
-                    self.get_action(
-                        tf.convert_to_tensor(obs), tf.constant(deterministic)
-                    )
+                    self.get_action(obs=obs_tensor, deterministic=deterministic_tensor)
                 )
                 total_steps += 1
                 ep_ret += reward
@@ -1084,9 +1067,18 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
                 metrics[seq_idx]["return"].append(ep_ret)
                 metrics[seq_idx]["ep_length"].append(ep_len)
 
+                postfix = {}
+                for task_id, metrics_dict in metrics.items():
+                    # Add a suffix with the task id if it is available.
+                    key_suffix = f"/{task_id}" if task_id != -1 else ""
+                    postfix.update(
+                        {key + key_suffix: np.mean(value) for key, value in metrics_dict.items()}
+                    )
+                test_pbar.set_postfix(postfix)
+        # Add a hook here for the subclasses to extend and use.
         self.on_test_loop_end()
 
-        env_success = test_env.pop_successes()
+        env_success: List[bool] = test_env.pop_successes()
         return env_success, metrics
 
     def on_task_switch(self, task_id: Optional[int]):
@@ -1128,9 +1120,7 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
         if self.algo_config.reset_buffer_on_task_change:
             assert self.algo_config.buffer_type == "fifo"
             self.replay_buffer = ReplayBuffer(
-                obs_dim=self.obs_dim,
-                act_dim=self.act_dim,
-                size=self.algo_config.replay_size,
+                obs_dim=self.obs_dim, act_dim=self.act_dim, size=self.algo_config.replay_size,
             )
 
         if self.algo_config.reset_critic_on_task_change:
