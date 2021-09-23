@@ -428,16 +428,15 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
         max_steps = env.max_steps
 
         # --- previous stuff ----
-
         obs, ep_ret, ep_len = env.reset(), 0, 0
         epoch_pbar_postfix: Dict[str, Union[str, int, float]] = {}
-        # NOTE: This might be a bit too large, we'll see.
-        log_queue_max_length = self.algo_config.log_every
-        self.log_queue: Deque[Dict[str, List]] = deque(maxlen=log_queue_max_length)
-
         # Main loop: collect experience in env and update/log each epoch
         epoch_pbar = tqdm(range(max_steps), desc="Training", position=0)
         for self.current_task_t in epoch_pbar:
+            epoch = self.current_task_t // self.algo_config.log_every + 1
+            if self.use_wandb:
+                wandb.log({"epoch": epoch, "current_task_t": self.current_task_t})
+
             # NOTE: Not doing this for now, because we don't want to call `on_task_switch` when in a
             # stationary context, and we also expect to have `on_task_switch` be called by the
             # Setting anyways if the task ids are available.
@@ -450,6 +449,12 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
             # Until start_steps have elapsed, randomly sample actions
             # from a uniform distribution for better exploration. Afterwards,
             # use the learned policy.
+            if self.current_task_t == self.algo_config.start_steps:
+                logger.info(
+                    f"Starting to use the network to select the actions rather than random at step "
+                    f"{self.current_task_t}"
+                )
+
             if self.current_task_t > self.algo_config.start_steps or (
                 self.algo_config.agent_policy_exploration and self.current_task_idx > 0
             ):
@@ -463,7 +468,6 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
             ep_len += 1
 
             # postfix.update({"train/return": ep_ret, "train/ep_length": ep_len})
-
             # Ignore the "done" signal if it comes from hitting the time
             # horizon (that is, when it's an artificial terminal signal
             # that isn't based on the agent's state)
@@ -561,15 +565,7 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
 
             # End of epoch wrap-up
             if ((self.current_task_t + 1) % self.algo_config.log_every == 0) or at_last_step:
-                epoch = (
-                    self.current_task_t + self.algo_config.log_every
-                ) // self.algo_config.log_every
-
                 print(f"Epoch {epoch} (self.current_task_t = {self.current_task_t})")
-                if self.use_wandb:
-                    wandb.log({"epoch": epoch})
-                    wandb.log({"current_task_t": self.current_task_t})
-
                 # Evaluation loop:
                 # NOTE: Could be interesting to add some kind of early stopping here!
                 successes_per_mode: Dict[bool, List[bool]] = defaultdict(list)
@@ -616,7 +612,7 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
                     mode = "deterministic" if deterministic else "stochastic"
                     prefix = "valid/" + (f"Task {task_id}/" if task_id != -1 else "")
                     suffix = f"/{mode}"
-                    success_ratio = np.mean(successes)
+                    success_ratio = np.mean(successes) if successes else 0.0
                     key = prefix + "average_success" + suffix
                     success_dict = {key: success_ratio}
                     print(f"\t{key}: {success_ratio:.2%}")
@@ -625,7 +621,8 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
                         wandb.log(success_dict)
 
                 # NOTE We assume here that SuccessCounter is outermost wrapper.
-                avg_success = np.mean(env.pop_successes())
+                successes = env.pop_successes()
+                avg_success = np.mean(successes) if successes else 0.0
                 if self.use_wandb:
                     wandb.log({"train/average_success": avg_success})
                     wandb.log({"current_task_idx": self.current_task_idx})
