@@ -1000,10 +1000,10 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
             mode = "deterministic" if deterministic else "stochastic"
             # self.logger.log_tabular(f"test/{mode}/average_success", np.mean(successes))
 
-    def on_test_episode_start(self, seq_idx: int, episode: int) -> None:
-        pass
-
-    def on_test_loop_end(self) -> None:
+    def on_eval_episode_start(self, seq_idx: int, episode: int) -> None:
+        """Hook that is basically here just for PackNet to get a chance to set the view during
+        validation.
+        """ 
         pass
 
     def test_agent_on_env(
@@ -1036,7 +1036,9 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
                 seq_idx = -1
             # prefix = key_prefix or f"test/{mode}/{seq_idx}/{test_env.name}"
 
-            self.on_test_episode_start(seq_idx=seq_idx, episode=episode)
+            # Adding this hook here just so we can a 1-1 equivalence with the original code where
+            # packnet does something here (sets a view for the current test task).
+            self.on_eval_episode_start(seq_idx=seq_idx, episode=episode)
 
             while not (done or (ep_len == self.task_config.max_ep_len)):
                 if test_env.is_closed() or total_steps >= test_env.max_steps:
@@ -1047,71 +1049,7 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
                 obs_tensor = tf.convert_to_tensor(obs)
                 deterministic_tensor = tf.convert_to_tensor(deterministic)
                 action = self.get_action(obs=obs_tensor, deterministic=deterministic_tensor)
-                # BUG: Getting this:
-                """
-                2021-09-23:15:58:53,532 INFO     [Sequoia/sequoia/settings/assumptions/incremental.py:204] Starting training on task 1.
-                2021-09-23:15:58:53,533 INFO     [continual_world.sequoia_integration.base_sac_method:1098] on_task_switch called with task_id = 1 (training=True, self.current_task_idx=0)
-                Training:   1% 9901/1000000 [02:51<5:38:06, 48.81it/s, train/return=9.94, train/ep_length=200, train/loss_pi=1.34e+08, train/loss_q1=2.75e+14, train/loss_q2=1.20e+14, train/loss_reg=0.00e+00]   
-                Training:   1% 9951/1000000 [02:52<5:21:2/home/toolkit/.local/lib/python3.8/site-packages/metaworld/envs/mujoco/mujoco_env.py:118: RuntimeWarning: Got MuJoCo Warning: Nan, Inf or huge value in QACC at DOF 0. The simulation is unstable. Time = 0.6250.        
-                warnings.warn(str(err), category=RuntimeWarning)
-                Training:   1% 9999/1000000 [02:52<4:44:57, 57.90it/s, train/return=19.8, train/ep_length=200, train/loss_pi=nan, train/loss_q1=nan, train/loss_q2=nan, train/loss_reg=0.00e+00]
-                Traceback (most recent call last):       
-                File "/home/toolkit/.local/bin/sequoia", line 33, in <module>
-                    sys.exit(load_entry_point('sequoia', 'console_scripts', 'sequoia')())
-                File "/workspace/Sequoia/sequoia/main.py", line 64, in main
-                    return run(setting=setting, method=method, config=config)
-                File "/workspace/Sequoia/sequoia/main.py", line 104, in run
-                    results = setting.apply(method, config=config)
-                File "/workspace/Sequoia/sequoia/settings/rl/continual/setting.py", line 874, in apply
-                    results = self.main_loop(method)
-                File "/workspace/Sequoia/sequoia/settings/assumptions/incremental.py", line 216, in main_loop
-                    method.fit(
-                File "/workspace/Sequoia/sequoia/methods/continual_world/continual_world/sequoia_integration/base_sac_method.py", line 582, in fit
-                    env_successes, task_metrics = self.test_agent_on_env(
-                File "/workspace/Sequoia/sequoia/methods/continual_world/continual_world/sequoia_integration/base_sac_method.py", line 1052, in test_agent_on_env
-                    obs, reward, done, _ = test_env.step(
-                File "/workspace/Sequoia/sequoia/methods/continual_world/continual_world/utils/wrappers.py", line 17, in step
-                    obs, reward, done, info = self.env.step(action)
-                File "/opt/conda/lib/python3.8/site-packages/gym/wrappers/time_limit.py", line 18, in step
-                    observation, reward, done, info = self.env.step(action)
-                File "/workspace/Sequoia/sequoia/methods/continual_world/continual_world/sequoia_integration/wrappers.py", line 145, in step
-                    obs, reward, done, info = super().step(action)
-                File "/opt/conda/lib/python3.8/site-packages/gym/core.py", line 248, in step
-                    return self.env.step(action)
-                File "/workspace/Sequoia/sequoia/settings/rl/wrappers/measure_performance.py", line 70, in step
-                    observation, rewards_, done, info = super().step(action)
-                File "/workspace/Sequoia/sequoia/common/gym_wrappers/utils.py", line 294, in step
-                    return super().step(action)
-                File "/opt/conda/lib/python3.8/site-packages/gym/core.py", line 248, in step
-                    return self.env.step(action)
-                File "/workspace/Sequoia/sequoia/settings/rl/continual/environment.py", line 335, in step
-                    return super().step(action)
-                File "/workspace/Sequoia/sequoia/common/gym_wrappers/utils.py", line 294, in step
-                    return super().step(action)
-                File "/opt/conda/lib/python3.8/site-packages/gym/core.py", line 248, in step
-                    return self.env.step(action)
-                File "/workspace/Sequoia/sequoia/common/gym_wrappers/env_dataset.py", line 148, in step
-                    observation, reward, done, info = super().step(action)
-                File "/workspace/Sequoia/sequoia/common/gym_wrappers/utils.py", line 294, in step
-                    return super().step(action)
-                File "/opt/conda/lib/python3.8/site-packages/gym/core.py", line 248, in step
-                    return self.env.step(action)
-                File "/workspace/Sequoia/sequoia/settings/rl/wrappers/typed_objects.py", line 67, in step
-                    observation, reward, done, info = self.env.step(action)
-                File "/workspace/Sequoia/sequoia/common/gym_wrappers/action_limit.py", line 65, in step
-                    obs, reward, done, info = super().step(action)
-                File "/workspace/Sequoia/sequoia/common/gym_wrappers/action_limit.py", line 29, in step
-                    obs, reward, done, info = self.env.step(action)
-                File "/workspace/Sequoia/sequoia/settings/rl/wrappers/task_labels.py", line 226, in step
-                    return self.observation(obs), reward, done, info
-                File "/workspace/Sequoia/sequoia/settings/rl/wrappers/task_labels.py", line 222, in observation
-                    return add_task_labels(observation, self.task_label)
-                File "/opt/conda/lib/python3.8/functools.py", line 875, in wrapper
-                    return dispatch(args[0].__class__)(*args, **kw)
-                File "/workspace/Sequoia/sequoia/common/gym_wrappers/multi_task_environment.py", line 81, in add_task_labels
-                    raise NotImplementedError(observation, task_labels)
-                NotImplementedError: (None, 1)
-                """
+                # NOTE: temporary Fix for a mujoco error caused by a nan in the action:
                 try:
                     obs, reward, done, _ = test_env.step(action)
                 except NotImplementedError as exc:
@@ -1141,8 +1079,6 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
                         {key + key_suffix: np.mean(value) for key, value in metrics_dict.items()}
                     )
                 test_pbar.set_postfix(postfix)
-        # Add a hook here for the subclasses to extend and use.
-        self.on_test_loop_end()
 
         env_success: List[bool] = test_env.pop_successes()
         return env_success, metrics

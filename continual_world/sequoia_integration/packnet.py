@@ -1,7 +1,9 @@
 import warnings
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple
+from logging import getLogger as get_logger
+from typing import Dict, List, Optional, Tuple
 
+import gym
 import tensorflow as tf
 import tqdm
 from continual_world.config import AlgoConfig
@@ -10,7 +12,9 @@ from continual_world.spinup.objects import BatchDict
 from continual_world.utils.utils import reset_optimizer
 from sequoia.settings.rl import TaskIncrementalRLSetting
 
-from .base_sac_method import GradientsTuple, SAC
+from .base_sac_method import SAC, GradientsTuple
+
+logger = get_logger(__name__)
 
 
 class PackNet(SAC, target_setting=TaskIncrementalRLSetting):  # type: ignore
@@ -55,9 +59,7 @@ class PackNet(SAC, target_setting=TaskIncrementalRLSetting):  # type: ignore
 
         actor_gradients, critic_gradients, alpha_gradient = gradients
         actor_gradients = self.packnet_helper.adjust_gradients(
-            actor_gradients,
-            self.actor.trainable_variables,
-            tf.convert_to_tensor(seq_idx),
+            actor_gradients, self.actor.trainable_variables, tf.convert_to_tensor(seq_idx),
         )
         if self.algo_config.regularize_critic:
             critic_gradients = self.packnet_helper.adjust_gradients(
@@ -66,16 +68,51 @@ class PackNet(SAC, target_setting=TaskIncrementalRLSetting):  # type: ignore
         gradients = GradientsTuple(actor_gradients, critic_gradients, alpha_gradient)
         return gradients, metrics
 
-    def on_test_episode_start(self, seq_idx: int, episode: int) -> None:
-        super().on_test_episode_start(seq_idx=seq_idx, episode=episode)
-        self.packnet_helper.set_view(seq_idx)
+    def fit(self, train_env: gym.Env, valid_env: gym.Env) -> None:
+        self.set_view(-1)
+        return super().fit(train_env, valid_env)
+    
+    def on_eval_episode_start(self, seq_idx: int, episode: int) -> None:
+        super().on_eval_episode_start(seq_idx=seq_idx, episode=episode)
+        self.set_view(seq_idx)
 
-    def on_test_loop_end(self) -> None:
-        super().on_test_loop_end()
-        self.packnet_helper.set_view(-1)
+    def test_agent_on_env(
+        self, test_env: gym.Env, deterministic: bool, max_episodes: int
+    ) -> Tuple[List[bool], Dict[int, Dict[str, List[float]]]]:
+        successes, metrics = super().test_agent_on_env(test_env, deterministic, max_episodes)
+        # Reset the most up-to-date version of the model.
+        self.set_view(-1)
+        return successes, metrics
+
+    def get_actions(
+        self, observations: TaskIncrementalRLSetting.Observations, action_space: gym.Space
+    ) -> TaskIncrementalRLSetting.Actions:
+        if observations.task_labels is not None:
+            task_id = observations.task_labels
+            if task_id > self.current_task_idx:
+                task_id = -1
+            self.set_view(task_id)
+        return super().get_actions(observations, action_space)
 
     def on_task_switch(self, task_id: Optional[int]):
         super().on_task_switch(task_id)
+
+    def set_view(self, task_id: int) -> None:
+        """ Set the "view" in the packnet helper if it isn't already set to that value. """
+        if self.packnet_helper.current_view != task_id:
+            if task_id == -1:
+                logger.info(f"Resetting the view to the most recent model.")
+            elif task_id > self.current_task_idx:
+                logger.warning(
+                    RuntimeWarning(
+                        f"Being tested on future task ({task_id}) for which we don't yet have a pruned"
+                        f" model! Using the latest model instead. "
+                    )
+                )
+                task_id = -1
+            else:
+                logger.info(f"Setting view to pruned model for task id {task_id}")
+            self.packnet_helper.set_view(task_id)
 
     def handle_task_boundary(self, task_id: int, training: bool) -> None:
         # NOTE: The base class doesn't currently do anything in this method, so it's safe to run it
@@ -92,6 +129,14 @@ class PackNet(SAC, target_setting=TaskIncrementalRLSetting):  # type: ignore
                     f"Unable to use PackNet effectively, since the task labels weren't given!"
                 )
             )
+        # NOTE: self.curent_task_idx is the *current* training task, while `task_id` is the new/next
+        # task.
+        # NOTE: We do nothing on the last task here.
+        if not training:
+            # If we're switching to a previous task, set the view.
+            # NOTE: If we switch to a task we haven't encountered before, we use the current
+            # (most up to date) view and raise a warning.
+            self.set_view(task_id)
 
         if training and 1 <= task_id < self.num_tasks - 1:
             if task_id == 1:
@@ -108,9 +153,7 @@ class PackNet(SAC, target_setting=TaskIncrementalRLSetting):  # type: ignore
 
             reset_optimizer(self.optimizer)
 
-            for _ in tqdm.tqdm(
-                range(self.algo_config.packnet_retrain_steps), desc="finetuning"
-            ):
+            for _ in tqdm.tqdm(range(self.algo_config.packnet_retrain_steps), desc="finetuning"):
                 batch = self.replay_buffer.sample_batch(self.algo_config.batch_size)
                 self.learn_on_batch(tf.convert_to_tensor(self.current_task_idx), batch)
 
