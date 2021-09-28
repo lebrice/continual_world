@@ -74,7 +74,6 @@ class RegMethod(SAC, ABC):
 
     def handle_task_boundary(self, task_id: int, training: bool) -> None:
         super().handle_task_boundary(task_id=task_id, training=training)
-        assert self.current_task_idx == task_id
         if training and task_id > 0:
             for old_param, new_param in zip(self.old_params, self.all_common_variables):
                 old_param.assign(new_param)
