@@ -84,7 +84,7 @@ class TestSACMethod(MethodTests):
         "dataset": "MountainCarContinuous-v0",
         "train_max_steps": 1_000,
         "max_episode_steps": 100,
-        "nb_tasks": 2,
+        "nb_tasks": 3,
     }
 
     # Save the fixture here so we can use it in the other tests subclasses.
