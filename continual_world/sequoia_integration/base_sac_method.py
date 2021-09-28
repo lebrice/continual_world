@@ -1167,12 +1167,13 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
         )
         # TODO: Remove `handle_task_boundary`, instead let the subclasses overwrite this method
         # directly, since there isn't a block of useful code before this part anymore.
-        self.handle_task_boundary(task_id=self.current_task_idx, training=self.training)
+        task_idx = task_id if task_id is not None else -1
+        self.handle_task_boundary(task_id=task_idx, training=self.training)
 
         if self.training:
             # NOTE: should we only update current_task_idx property when training?
             # or also during testing?
-            self.current_task_idx = task_id if task_id is not None else -1
+            self.current_task_idx = task_idx
         else:
             # Don't do the rest if self.training is False.
             logger.info(

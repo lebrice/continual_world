@@ -22,7 +22,7 @@ class PackNet(SAC, target_setting=TaskIncrementalRLSetting):  # type: ignore
 
     def __init__(self, algo_config: "PackNet.Config"):
         super().__init__(algo_config=algo_config)
-        self.algo_config: AlgoConfig
+        self.algo_config: "PackNet.Config"
         self.packnet_helper: PackNetHelper
 
     def configure(self, setting: TaskIncrementalRLSetting) -> None:
