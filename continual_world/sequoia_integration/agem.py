@@ -52,7 +52,9 @@ class AGEM(SAC):
 
     def handle_task_boundary(self, task_id: int, training: bool) -> None:
         super().handle_task_boundary(task_id=task_id, training=training)
-        if task_id > 0 and training:
+        # NOTE: Should we also do this agem step when the task IDS aren't available (task_id = -1)?
+        # For now that's not a problem, because we always have task IDS during training.
+        if training and task_id > 0:
             size = self.episodic_memory.size
             max_size = self.episodic_memory.max_size
             logger.info(f"Episodic memory buffer has {size}/{max_size} items.")
