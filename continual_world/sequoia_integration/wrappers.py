@@ -27,16 +27,18 @@ def wrap_sequoia_env(
     env: RLEnvironment,
     nb_tasks_in_env: int,
     add_task_ids: bool,
+    max_episode_steps: Optional[int] = None,
     is_multitask: bool = False,
     scale_reward: bool = False,
     div_by_return: bool = False,
 ) -> "SequoiaToCWWrapper":
-    # TODO: Implement a wrapper to mimic the `MultiTaskEnv` API from CW when the environment is
+    # TODO: Implement a wrapper to mimic the `MultiTaskEnv` class from CW when the environment is
     # stationary.
     env = SequoiaToCWWrapper(
         env, nb_tasks_in_env=nb_tasks_in_env, add_task_labels=add_task_ids
     )
-    env = TimeLimit(env, max_episode_steps=META_WORLD_TIME_HORIZON)
+    if max_episode_steps is not None:
+        env = TimeLimit(env, max_episode_steps=max_episode_steps)
     env = SuccessCounter(env)
 
     if scale_reward:

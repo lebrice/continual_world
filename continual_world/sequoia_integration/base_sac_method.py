@@ -240,7 +240,6 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
         self.stationary_context = setting.stationary_context
         self.nb_tasks_in_train_env = setting.nb_tasks if setting.stationary_context else 1
         self.nb_tasks_in_valid_env = setting.nb_tasks if setting.stationary_context else 1
-
         self.current_task_idx = -1
 
         if setting.wandb and setting.wandb.project:
@@ -404,16 +403,20 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
         valid_env : gym.Env
             Validation environment.
         """
+        # NOTE: This is being set based on the value in the setting.
+        max_episode_steps = self.task_config.max_ep_len
         env: SequoiaToCWWrapper = wrap_sequoia_env(
             train_env,
             nb_tasks_in_env=self.nb_tasks_in_train_env,
             add_task_ids=self.add_task_ids,
+            max_episode_steps=max_episode_steps,
             is_multitask=self.stationary_context,
         )
         val_env: SequoiaToCWWrapper = wrap_sequoia_env(
             valid_env,
             nb_tasks_in_env=self.nb_tasks_in_valid_env,
             add_task_ids=self.add_task_ids,
+            max_episode_steps=max_episode_steps,
             is_multitask=self.stationary_context,
         )
 
