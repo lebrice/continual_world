@@ -1,5 +1,6 @@
 from dataclasses import dataclass
-from typing import Dict, Type, Tuple
+from typing import Dict, Type, Tuple, Optional
+from simple_parsing.helpers.hparams.hparam import categorical
 import tensorflow as tf
 
 from sequoia.settings.rl.setting import RLSetting
@@ -15,12 +16,13 @@ from .base_sac_method import SAC
 class VCL(SAC):
     @dataclass
     class Config(SAC.Config):
+        cl_reg_coef: float = categorical(1e-7 , 1e-6 , 1e-5 , 1e-4 , 1e-3 , 1e-2 , 1e-1 , 1, default=1)
         vcl_first_task_kl: bool = True
         vcl_variational_ln: bool = False
 
     def __init__(self, algo_config: "VCL.Config"):
         super().__init__(algo_config=algo_config)
-        self.algo_config: AlgoConfig
+        self.algo_config: VCL.Config
         self.vcl_helper: VclHelper
 
         # Change the type of actor, compared to the base SAC method.
@@ -37,35 +39,39 @@ class VCL(SAC):
             self.actor, self.critic1, self.critic2, self.algo_config.regularize_critic
         )
 
-    def get_auxiliary_loss(self, seq_idx: int) -> Tuple[tf.Tensor, tf.Tensor]:
+    # @tf.function
+    def get_auxiliary_loss(self, seq_idx: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
         aux_pi_loss, aux_value_loss = super().get_auxiliary_loss(seq_idx=seq_idx)
 
         reg_loss = self.vcl_helper.regularize(
             seq_idx, regularize_last_layer=self.algo_config.vcl_first_task_kl
         )
-        reg_loss_coef = (
-            self.algo_config.cl_reg_coef
-            if seq_idx > 0 or self.algo_config.vcl_first_task_kl
-            else 0.0
-        )
-        # reg_loss_coef = tf.cond(
-        #     seq_idx > 0 or self.algo_config.vcl_first_task_kl,
-        #     lambda: self.algo_config.cl_reg_coef,
-        #     lambda: 0.0,
+        # reg_loss_coef = (
+        #     self.algo_config.cl_reg_coef
+        #     if seq_idx > 0 or self.algo_config.vcl_first_task_kl
+        #     else 0.0
         # )
+        reg_loss_coef = tf.cond(
+            seq_idx > 0 or self.algo_config.vcl_first_task_kl,
+            lambda: self.algo_config.cl_reg_coef,
+            lambda: 0.0,
+        )
         reg_loss *= reg_loss_coef
         aux_pi_loss += reg_loss
         return aux_pi_loss, aux_value_loss
 
     def handle_task_boundary(self, task_id: int, training: bool) -> None:
         super().handle_task_boundary(task_id=task_id, training=training)
-
+        # TODO: There seems to be something weird here.
+        # Maybe this 'update_prior' call needs to happen before/after the model is updated with more
+        # weights?
+        # getting var and grad have different shapes.
         if training and task_id > 0:
             self.vcl_helper.update_prior()
 
-    # @tf.function
+    @tf.function
     def get_action(
-        self, obs: tf.Tensor, deterministic: bool = tf.constant(False)
+        self, obs: tf.Tensor, deterministic: bool = False
     ) -> tf.Tensor:
         # NOTE: (from the original implementation):
         # Disabling multiple samples in VCL for faster evaluation

@@ -11,6 +11,7 @@ import logging
 import math
 import os
 import random
+import sys
 import time
 import warnings
 from argparse import Namespace
@@ -58,6 +59,11 @@ try:
     from typing import Literal  # type: ignore
 except ImportError:
     from typing_extensions import Literal  # type: ignore
+
+# NOTE: Set this to True, because it's the decent thing to do.
+gpus = tf.config.list_physical_devices("GPU")
+for gpu in gpus:
+    tf.config.experimental.set_memory_growth(gpu, True)
 
 logger = logging.getLogger(__name__)
 
@@ -214,7 +220,8 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
         # Wether the tasks follow some non-stationary distribution, or if they are uniformly sampled
         self.stationary_context: bool = False
 
-        self.log_queue: Deque[Dict[str, np.ndarray]]
+        # debugging graph vs eager mode:
+        self.learn_on_batch_calls: int = 0
 
     def configure(self, setting: DiscreteTaskAgnosticRLSetting) -> None:
         """ Configure the Method before training begins on the envs of the Setting. """
@@ -430,8 +437,8 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
         # NOTE: Not ideal: Get the max number of steps from the env.
         max_steps = env.max_steps
 
-        # --- previous stuff ----
         obs, ep_ret, ep_len = env.reset(), 0, 0
+
         epoch_pbar_postfix: Dict[str, Union[str, int, float]] = {}
         # Main loop: collect experience in env and update/log each epoch
         epoch_pbar = tqdm(range(max_steps), desc="Training", position=0)
@@ -461,7 +468,12 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
             if self.current_task_t > self.algo_config.start_steps or (
                 self.algo_config.agent_policy_exploration and self.current_task_idx > 0
             ):
-                action = self.get_action(tf.convert_to_tensor(obs))
+                action = self.get_action(
+                    obs=tf.convert_to_tensor(obs),
+                    deterministic=tf.convert_to_tensor(
+                        False
+                    ),  # todo: wasn't set, using False here.
+                )
             else:
                 action = env.action_space.sample()
 
@@ -756,16 +768,21 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
         else:
             obs = observations.x
 
-        action: tf.Tensor = self.get_action(tf.convert_to_tensor(obs))
+        action: tf.Tensor = self.get_action(
+            obs=tf.convert_to_tensor(obs), deterministic=tf.convert_to_tensor(False)
+        )
         action_np = action.numpy()
         if isinstance(action_space, TypedDictSpace):
             return action_space.dtype(action_np)
         return action_np
 
-    # @tf.function(experimental_follow_type_hints=True)
+    @tf.function
     def learn_on_batch(
         self, seq_idx: tf.Tensor, batch: BatchDict, episodic_batch: Optional[BatchDict] = None,
     ) -> Dict:
+        # NOTE: incrementing this to help debug/test how many times `self.learn_on_batch` is traced
+        # when running in graph mode.
+        self.learn_on_batch_calls += 1
         gradients, metrics = self.get_gradients(
             seq_idx=seq_idx,
             obs1=batch["obs1"],
@@ -784,12 +801,6 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
             )
         self.apply_update(actor_gradients, critic_gradients, alpha_gradient)
         return metrics
-
-    def get_learn_on_batch(self):
-        # TODO: This was wrapped in a function so it would return a tf.function.
-        # Not sure this is actually useful here though.
-        return tf.function(self.learn_on_batch)
-        # return self.learn_on_batch
 
     @tf.function
     def get_log_alpha(self, obs: tf.Tensor):
@@ -813,7 +824,7 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
             return self.log_alpha
 
     @tf.function
-    def get_action(self, obs: tf.Tensor, deterministic: bool = tf.constant(False)) -> tf.Tensor:
+    def get_action(self, obs: tf.Tensor, deterministic: tf.Tensor) -> tf.Tensor:
         mu, log_std, pi, logp_pi = self.actor(tf.expand_dims(obs, 0))
         if deterministic:
             return mu[0]
@@ -911,7 +922,8 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
         # TODO: Huuh why are we deleting g?
         del g
 
-        if self.critic_cl is PopArtMlpCritic:
+        # if self.critic_cl is PopArtMlpCritic:
+        if isinstance(self.critic1, PopArtMlpCritic):
             # Stats are shared between critic1 and critic2.
             # We keep them only in critic1.
             self.critic1.update_stats(q_backup, obs1)
@@ -933,7 +945,7 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
         )
         return gradients, metrics
 
-    def get_auxiliary_losses(self, seq_idx: int) -> Tuple[tf.Tensor, tf.Tensor]:
+    def get_auxiliary_losses(self, seq_idx: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
         """ Get auxiliary losses for the actor and critic for the given task index.
 
         NOTE: This is added as 'hook' for the regularization methods to implement. 
@@ -942,6 +954,7 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
         aux_value_loss = tf.zeros([1])
         return aux_pi_loss, aux_value_loss
 
+    @tf.function
     def apply_update(
         self,
         actor_gradients: List[tf.Tensor],
@@ -1006,7 +1019,7 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
     def on_eval_episode_start(self, seq_idx: int, episode: int) -> None:
         """Hook that is basically here just for PackNet to get a chance to set the view during
         validation.
-        """ 
+        """
         pass
 
     def test_agent_on_env(
@@ -1034,10 +1047,11 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
 
             # Update the seq_idx at the beginning of each episode, since we might be switching tasks
             # within one env in Sequoia.
+            # TODO: This isn't quite right: Should use the task id from the observations
+            # (if we have them). This appears to work for now, but might come back to bite us later.
             seq_idx = test_env.cur_seq_idx
             if seq_idx is None:
                 seq_idx = -1
-            # prefix = key_prefix or f"test/{mode}/{seq_idx}/{test_env.name}"
 
             # Adding this hook here just so we can a 1-1 equivalence with the original code where
             # packnet does something here (sets a view for the current test task).
@@ -1049,9 +1063,10 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
                     break
 
                 assert obs is not None
-                obs_tensor = tf.convert_to_tensor(obs)
-                deterministic_tensor = tf.convert_to_tensor(deterministic)
-                action = self.get_action(obs=obs_tensor, deterministic=deterministic_tensor)
+                action = self.get_action(
+                    obs=tf.convert_to_tensor(obs),
+                    deterministic=tf.convert_to_tensor(deterministic),
+                )
                 # NOTE: temporary Fix for a mujoco error caused by a nan in the action:
                 try:
                     obs, reward, done, _ = test_env.step(action)
@@ -1142,20 +1157,27 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
         # E.g: For VCL after the first task we set trainable=False for layer
         # normalization. We need to recompute the graph in order for TensorFlow
         # to notice this change.
-        self.learn_on_batch = self.get_learn_on_batch()
+        # NOTE: (shouldn't the order be changed, in case the reg methods use the weights in their
+        # loss calculations?)
         self.all_variables = self.actor.trainable_variables + self.critic_variables
         self.all_common_variables = (
             self.actor.common_variables
             + self.critic1.common_variables
             + self.critic2.common_variables
         )
+        # Force re-tracing, in case the networks changed.
+        # NOTE: This seems to not be necessary anymore?
+        # self.learn_on_batch = tf.function(self.learn_on_batch.python_function)
+        # self.get_gradients = tf.function(self.get_gradients.python_function)
 
     def handle_task_boundary(self, task_id: int, training: bool) -> None:
         """Hook added for the subclasses of SAC, to customize what they want to do when a task
         boundary is reached.
 
         NOTE: It isn't really necessary for this to be its own method. Could be removed and just let
-        the subclasses overwrite just `on_task_switch`.
+        the subclasses overwrite just `on_task_switch`. The only problem with doing it this way is
+        that there would be quite a bit of copy-pasting involved.
+
         Another possibility would be to move the 'buffer clearing' logic to another callback or
         something similar.
 

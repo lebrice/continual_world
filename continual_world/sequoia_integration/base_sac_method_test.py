@@ -1,8 +1,10 @@
 import logging
+import time
 from dataclasses import asdict
 from typing import Any, Callable, ClassVar, Dict, Tuple, Type
 
 import pytest
+import tensorflow as tf
 from sequoia.common.config import Config
 from sequoia.methods.method_test import MethodTests, MethodType
 from sequoia.methods.random_baseline import RandomBaselineMethod
@@ -13,6 +15,8 @@ from simple_parsing import ArgumentParser
 from .base_sac_method import SAC
 
 logger = logging.getLogger(__name__)
+
+# IDEA: Create a fixture to run tests on CPU and (optionally) on GPU.
 
 
 @pytest.fixture(scope="session")
@@ -58,7 +62,6 @@ def test_get_random_performance_fixture(
     setting = IncrementalRLSetting(
         dataset="MountainCarContinuous-v0", nb_tasks=1, train_max_steps=1_000
     )
-    import time
 
     start_time = time.time()
     random_results = get_random_performance(setting)
@@ -77,7 +80,6 @@ def test_get_random_performance_fixture(
 
 from continual_world.defaults import CL_DEFAULTS
 
-
 class TestSACMethod(MethodTests):
     Method: ClassVar[Type[SAC]] = SAC
     setting_kwargs: ClassVar[Dict[str, Any]] = {
@@ -91,6 +93,15 @@ class TestSACMethod(MethodTests):
     get_random_performance = staticmethod(get_random_performance)
 
     non_default_config_values: ClassVar[Dict[str, Any]] = {}
+
+    @pytest.fixture(params=[True, False], autouse=True)
+    def eager_mode(self, request):
+        """ Fixture that makes all tests run with `tf.function` disabled and then enabled.
+        """
+        eager: bool = request.param
+        tf.config.run_functions_eagerly(eager)
+        yield eager
+
 
     def test_values_match_default(self):
         config = self.Method.Config()
@@ -166,6 +177,8 @@ class TestSACMethod(MethodTests):
             results=results,
             get_random_performance_fn=get_random_performance,
         )
+        # TODO: Don't really have a way of actually verifying that things work in both graph and
+        # eager mode atm.
 
     def validate_results(
         self,
