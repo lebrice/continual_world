@@ -74,10 +74,8 @@ class AGEM(SAC):
         # NOTE: super().on_task_switch does things first, and then calls self.handle_task_boundary.
         super().on_task_switch(task_id)
 
-        # BUG: Gradients and var don't have the same shape!
-        # TODO: Maybe need to do this after the resetting of the models/variables/etc.
-        self.learn_on_batch = tf.function(self.learn_on_batch)
-        self.get_gradients = tf.function(self.get_gradients)
+        # self.learn_on_batch = tf.function(self.learn_on_batch)
+        # self.get_gradients = tf.function(self.get_gradients)
 
     def sample_batches(self) -> Tuple[BatchDict, BatchDict]:
         batch, episodic_batch = super().sample_batches()
@@ -87,7 +85,6 @@ class AGEM(SAC):
             )
         return batch, episodic_batch
 
-    @tf.function
     def get_gradients(
         self,
         seq_idx: tf.Tensor,

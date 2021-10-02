@@ -16,7 +16,7 @@ from .base_sac_method import SAC
 class VCL(SAC):
     @dataclass
     class Config(SAC.Config):
-        cl_reg_coef: float = categorical(1e-7 , 1e-6 , 1e-5 , 1e-4 , 1e-3 , 1e-2 , 1e-1 , 1, default=1)
+        cl_reg_coef: float = categorical(1e-7, 1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1, default=1)
         vcl_first_task_kl: bool = True
         vcl_variational_ln: bool = False
 
@@ -41,6 +41,7 @@ class VCL(SAC):
 
     # @tf.function
     def get_auxiliary_loss(self, seq_idx: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
+        assert isinstance(seq_idx, tf.Tensor)
         aux_pi_loss, aux_value_loss = super().get_auxiliary_loss(seq_idx=seq_idx)
 
         reg_loss = self.vcl_helper.regularize(
@@ -69,10 +70,7 @@ class VCL(SAC):
         if training and task_id > 0:
             self.vcl_helper.update_prior()
 
-    @tf.function
-    def get_action(
-        self, obs: tf.Tensor, deterministic: bool = False
-    ) -> tf.Tensor:
+    def get_action(self, obs: tf.Tensor, deterministic: bool = False,) -> tf.Tensor:
         # NOTE: (from the original implementation):
         # Disabling multiple samples in VCL for faster evaluation
         return super().get_action(obs=obs, deterministic=deterministic)

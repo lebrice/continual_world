@@ -470,9 +470,7 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
             ):
                 action = self.get_action(
                     obs=tf.convert_to_tensor(obs),
-                    deterministic=tf.convert_to_tensor(
-                        False
-                    ),  # todo: wasn't set, using False here.
+                    deterministic=False,  # note: wasn't set before, passing False now.
                 )
             else:
                 action = env.action_space.sample()
@@ -769,7 +767,7 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
             obs = observations.x
 
         action: tf.Tensor = self.get_action(
-            obs=tf.convert_to_tensor(obs), deterministic=tf.convert_to_tensor(False)
+            obs=tf.convert_to_tensor(obs), deterministic=False
         )
         action_np = action.numpy()
         if isinstance(action_space, TypedDictSpace):
@@ -780,6 +778,13 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
     def learn_on_batch(
         self, seq_idx: tf.Tensor, batch: BatchDict, episodic_batch: Optional[BatchDict] = None,
     ) -> Dict:
+        # Check that things are tensors, not numpy arrays or anything else. Otherwise they become
+        # constants, rather than graph input tensors.
+        assert isinstance(seq_idx, tf.Tensor)
+        assert all(isinstance(v, tf.Tensor) for v in batch.values())
+        if episodic_batch is not None:
+            assert all(isinstance(v, tf.Tensor) for v in batch.values())
+
         # NOTE: incrementing this to help debug/test how many times `self.learn_on_batch` is traced
         # when running in graph mode.
         self.learn_on_batch_calls += 1
@@ -802,7 +807,6 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
         self.apply_update(actor_gradients, critic_gradients, alpha_gradient)
         return metrics
 
-    @tf.function
     def get_log_alpha(self, obs: tf.Tensor):
         # TODO: This seems to use the task labels, right? What if we don't have access to them?
         # NOTE: all_log_alpha is initialized to `np.ones((self.num_tasks, 1)`
@@ -823,15 +827,13 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
             assert isinstance(self.log_alpha, tf.Variable)
             return self.log_alpha
 
-    @tf.function
-    def get_action(self, obs: tf.Tensor, deterministic: tf.Tensor) -> tf.Tensor:
+    def get_action(self, obs: tf.Tensor, deterministic: bool = False) -> tf.Tensor:
         mu, log_std, pi, logp_pi = self.actor(tf.expand_dims(obs, 0))
         if deterministic:
             return mu[0]
         else:
             return pi[0]
 
-    @tf.function
     def get_gradients(
         self,
         seq_idx: tf.Tensor,
@@ -842,6 +844,7 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
         done: tf.Tensor,
         episodic_batch: Optional[BatchDict] = None,
     ) -> Tuple[GradientsTuple, Dict]:
+        assert isinstance(seq_idx, tf.Tensor)
         with tf.GradientTape(persistent=True) as g:
             # Main outputs from computation graph
             mu, log_std, pi, logp_pi = self.actor(obs1)
@@ -954,7 +957,6 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
         aux_value_loss = tf.zeros([1])
         return aux_pi_loss, aux_value_loss
 
-    @tf.function
     def apply_update(
         self,
         actor_gradients: List[tf.Tensor],
@@ -1065,7 +1067,7 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
                 assert obs is not None
                 action = self.get_action(
                     obs=tf.convert_to_tensor(obs),
-                    deterministic=tf.convert_to_tensor(deterministic),
+                    deterministic=deterministic,
                 )
                 # NOTE: temporary Fix for a mujoco error caused by a nan in the action:
                 try:
@@ -1166,9 +1168,17 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
             + self.critic2.common_variables
         )
         # Force re-tracing, in case the networks changed.
-        # NOTE: This seems to not be necessary anymore?
-        # self.learn_on_batch = tf.function(self.learn_on_batch.python_function)
-        # self.get_gradients = tf.function(self.get_gradients.python_function)
+        # NOTE: This doesn't seem to be necessary anymore. Not 100% sure why.
+        # - The `self.learn_on_batch` used to be *before* the changes to `self.all_variables` and
+        #   `self.all_common_variables`, which might have been a part of the issue;
+        # - once `learn_on_batch` is decorated with tf.function, manually calling these don't
+        #   actually force re-tracing `tf.function`!
+        # self.learn_on_batch = tf.function(self.learn_on_batch)
+        # self.get_gradients = tf.function(self.get_gradients)
+        # note: Can use the <Function>.python_function to get the wrapped python function.
+        # - Either both or none of `get_gradients` and `apply_update` should be graphed; graphing
+        # only one doesn't work.
+        # - Graphing only `learn_on_batch` *should* work as well.
 
     def handle_task_boundary(self, task_id: int, training: bool) -> None:
         """Hook added for the subclasses of SAC, to customize what they want to do when a task

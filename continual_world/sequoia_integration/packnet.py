@@ -36,7 +36,6 @@ class PackNet(SAC, target_setting=TaskIncrementalRLSetting):  # type: ignore
             packnet_models.extend([self.critic1, self.critic2])
         self.packnet_helper = PackNetHelper(packnet_models)
 
-    @tf.function
     def get_gradients(
         self,
         seq_idx: tf.Tensor,

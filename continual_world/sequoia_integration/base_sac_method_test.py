@@ -11,6 +11,7 @@ from sequoia.methods.random_baseline import RandomBaselineMethod
 from sequoia.settings.rl import RLSetting
 from sequoia.settings.rl.incremental.setting import IncrementalRLSetting
 from simple_parsing import ArgumentParser
+from continual_world.defaults import CL_DEFAULTS
 
 from .base_sac_method import SAC
 
@@ -78,7 +79,6 @@ def test_get_random_performance_fixture(
     get_random_performance._cache.clear()  # type: ignore
 
 
-from continual_world.defaults import CL_DEFAULTS
 
 class TestSACMethod(MethodTests):
     Method: ClassVar[Type[SAC]] = SAC
@@ -93,15 +93,6 @@ class TestSACMethod(MethodTests):
     get_random_performance = staticmethod(get_random_performance)
 
     non_default_config_values: ClassVar[Dict[str, Any]] = {}
-
-    @pytest.fixture(params=[True, False], autouse=True)
-    def eager_mode(self, request):
-        """ Fixture that makes all tests run with `tf.function` disabled and then enabled.
-        """
-        eager: bool = request.param
-        tf.config.run_functions_eagerly(eager)
-        yield eager
-
 
     def test_values_match_default(self):
         config = self.Method.Config()
@@ -163,22 +154,40 @@ class TestSACMethod(MethodTests):
         algo_config = self.Method.Config(start_steps=50, update_after=50, update_every=100)
         return self.Method(algo_config=algo_config)
 
+    # @pytest.fixture(params=[False, True], autouse=True)
+    # def eager_mode(self, request):
+    #     """ Fixture that makes all tests run with `tf.function` disabled and then enabled.
+    #     """
+    #     eager: bool = request.param
+    #     tf.config.run_functions_eagerly(eager)
+    #     yield eager
+
+    @pytest.mark.parametrize("eager_mode", [False,]) #True])
+    # @pytest.mark.timeout(30)
     def test_debug(
         self,
         method: MethodType,
         setting: RLSetting,
         config: Config,
         get_random_performance: Callable[[RLSetting], RLSetting.Results],
-    ):
+        eager_mode: bool,
+    ):  
+        tf.config.run_functions_eagerly(eager_mode)
         results: RLSetting.Results = setting.apply(method, config=config)
+
         self.validate_results(
             setting=setting,
             method=method,
             results=results,
             get_random_performance_fn=get_random_performance,
         )
-        # TODO: Don't really have a way of actually verifying that things work in both graph and
-        # eager mode atm.
+        if not eager_mode:
+            # idea: Could check the number of run traces for `learn_on_batch`.
+            # TODO: learn_on_batch_calls is 2 when not using eager mode, which seems a bit odd given
+            # that there are three tasks! Would be a good idea to check the arguments to that
+            # function for each trace, and see if the task ID changes or something else does.
+            # assert method.learn_on_batch_calls == setting.nb_tasks - 1
+            pass
 
     def validate_results(
         self,
@@ -205,6 +214,10 @@ class TestSACMethod(MethodTests):
         args = parser.parse_args([])
         method = self.Method.from_argparse_args(args)
         assert isinstance(method, self.Method)
+        # Check that the default values from the command-line are the same as the default values
+        # when created in code.
+        assert method.algo_config == self.Method.Config()
 
-    def test_get_search_space(self):
-        pass
+    # TODO: Not using their search space for now. But we could.
+    # def test_get_search_space(self):
+    #     pass
