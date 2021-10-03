@@ -63,10 +63,6 @@ class VCL(SAC):
 
     def handle_task_boundary(self, task_id: int, training: bool) -> None:
         super().handle_task_boundary(task_id=task_id, training=training)
-        # TODO: There seems to be something weird here.
-        # Maybe this 'update_prior' call needs to happen before/after the model is updated with more
-        # weights?
-        # getting var and grad have different shapes.
         if training and task_id > 0:
             self.vcl_helper.update_prior()
 
