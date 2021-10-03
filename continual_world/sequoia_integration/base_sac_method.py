@@ -120,7 +120,6 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
         clipnorm: Optional[float] = None
 
         target_output_std: float = categorical(0.03, 0.089, 0.3, default=0.089)
-        packnet_fake_num_tasks: Optional[int] = None
         agent_policy_exploration: bool = False
         critic_reg_coef: float = 1.0
 
@@ -667,16 +666,6 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
                 #     seq_idx=info.get("seq_idx"),
                 # )
 
-    # def end_of_epoch(
-    #     self,
-    #     train_env: SequoiaToCWWrapper,
-    #     val_env: SequoiaToCWWrapper,
-    #     epoch: int,
-    #     t: int,
-    #     seq_idx: int = None,
-    # ):
-    #     # Save model
-
     def sample_batches(self) -> Tuple[BatchDict, Optional[BatchDict]]:
         batch = self.replay_buffer.sample_batch(self.algo_config.batch_size)
         episodic_batch = None
@@ -1140,11 +1129,10 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
 
         # Reset the number of training steps taken in the current task.
         self.current_task_t = 0
+
         if self.algo_config.reset_buffer_on_task_change:
-            assert self.algo_config.buffer_type == "fifo"
-            self.replay_buffer = ReplayBuffer(
-                obs_dim=self.obs_dim, act_dim=self.act_dim, size=self.algo_config.replay_size,
-            )
+            logger.info(f"Clearing the replay buffer.")
+            self.replay_buffer = self.create_replay_buffer()
 
         if self.algo_config.reset_critic_on_task_change:
             reset_weights(self.critic1, self.critic_cl, self.critic_kwargs)

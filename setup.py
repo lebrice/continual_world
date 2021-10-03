@@ -34,6 +34,8 @@ setuptools.setup(
             "mas     = continual_world.sequoia_integration.reg_methods:MAS",
             "packnet = continual_world.sequoia_integration.packnet:PackNet",
             "vcl     = continual_world.sequoia_integration.vcl:VCL",
+            "replay  = continual_world.sequoia_integration.replay:Replay",
+            "perfect_memory  = continual_world.sequoia_integration.replay:PerfectMemory",
         ],
     },
     python_requires='>=3.7',

@@ -87,8 +87,12 @@ class ReservoirReplayBuffer(ReplayBuffer):
     self.timestep += 1
 
     if current_t < self.max_size:
+      # if the buffer isn't full, just store the samples at the last index.
       buffer_idx = current_t
     else:
+      # If the buffer is full, first sample a value in the interval [0, t]
+      # If that valus is in range [0, self.max_size], store the sample
+      # Otherwise, discard it.
       buffer_idx = random.randint(0, current_t)
       if buffer_idx >= self.max_size:
         return

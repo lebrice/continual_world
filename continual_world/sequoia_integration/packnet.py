@@ -18,11 +18,18 @@ logger = get_logger(__name__)
 
 
 class PackNet(SAC, target_setting=TaskIncrementalRLSetting):  # type: ignore
+    """ PackNet method, applied to the SAC backbone.
+    """
+
+    # TODO: Add citation.
+    
     # NOTE: This PackNet method requires task labels for now.
 
     @dataclass
     class Config(SAC.Config):
         packnet_retrain_steps: int = 1000  # TODO: Double-check the value here.
+        packnet_fake_num_tasks: Optional[int] = None
+        
 
     def __init__(self, algo_config: "PackNet.Config"):
         super().__init__(algo_config=algo_config)
