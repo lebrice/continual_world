@@ -234,9 +234,11 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
         # --cl_method ewc \
         # --cl_reg_coef 1e4 \
         # --logger_output tsv tensorboard
-
+        base_seed = setting.config.seed if setting.config else None
+        logger.info(f"Using random seed {base_seed}")
+        # TODO: Shouldn't really have to pass tasks to this, but it's a require argument atm.
         self.task_config = TaskConfig(
-            seed=0,
+            seed=base_seed,
             tasks="DOUBLE_PMO1",
             steps_per_task=setting.train_steps_per_task,
             max_ep_len=setting.max_episode_steps,
@@ -675,11 +677,17 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
         # Create experience buffer
         if self.algo_config.buffer_type == "fifo":
             return ReplayBuffer(
-                obs_dim=self.obs_dim, act_dim=self.act_dim, size=self.algo_config.replay_size,
+                obs_dim=self.obs_dim,
+                act_dim=self.act_dim,
+                size=self.algo_config.replay_size,
+                seed=self.task_config.seed,
             )
         elif self.algo_config.buffer_type == "reservoir":
             return ReservoirReplayBuffer(
-                obs_dim=self.obs_dim, act_dim=self.act_dim, size=self.algo_config.replay_size,
+                obs_dim=self.obs_dim,
+                act_dim=self.act_dim,
+                size=self.algo_config.replay_size,
+                seed=self.task_config.seed,
             )
         else:
             raise NotImplementedError(self.algo_config.buffer_type)
@@ -755,9 +763,7 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
         else:
             obs = observations.x
 
-        action: tf.Tensor = self.get_action(
-            obs=tf.convert_to_tensor(obs), deterministic=False
-        )
+        action: tf.Tensor = self.get_action(obs=tf.convert_to_tensor(obs), deterministic=False)
         action_np = action.numpy()
         if isinstance(action_space, TypedDictSpace):
             return action_space.dtype(action_np)
@@ -1055,8 +1061,7 @@ class SAC(Method, target_setting=IncrementalRLSetting):  # type: ignore
 
                 assert obs is not None
                 action = self.get_action(
-                    obs=tf.convert_to_tensor(obs),
-                    deterministic=deterministic,
+                    obs=tf.convert_to_tensor(obs), deterministic=deterministic,
                 )
                 # NOTE: temporary Fix for a mujoco error caused by a nan in the action:
                 try:

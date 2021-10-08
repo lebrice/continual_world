@@ -20,7 +20,7 @@ class TaskConfig(Serializable):
     tasks: str = choice(*list(task_seq_to_task_list.keys()))  # type: ignore
 
     # Random seed used for running the experiments
-    seed: int = 123
+    seed: Optional[int] = 123
     # Numer of steps per task
     steps_per_task: int = field(default=int(1e6), type=sci2int)
 

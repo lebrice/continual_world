@@ -46,7 +46,10 @@ class AGEM(SAC):
         # Also create the episodic memory buffer.
         episodic_mem_size = self.algo_config.episodic_mem_per_task * self.num_tasks
         self.episodic_memory = EpisodicMemory(
-            obs_dim=self.obs_dim, act_dim=self.act_dim, size=episodic_mem_size
+            obs_dim=self.obs_dim,
+            act_dim=self.act_dim,
+            size=episodic_mem_size,
+            seed=self.task_config.seed,
         )
         self.agem_helper = AgemHelper()
 
@@ -80,9 +83,7 @@ class AGEM(SAC):
     def sample_batches(self) -> Tuple[BatchDict, BatchDict]:
         batch, episodic_batch = super().sample_batches()
         if self.current_task_idx > 0:
-            episodic_batch = self.episodic_memory.sample_batch(
-                self.algo_config.episodic_batch_size
-            )
+            episodic_batch = self.episodic_memory.sample_batch(self.algo_config.episodic_batch_size)
         return batch, episodic_batch
 
     def get_gradients(
@@ -122,9 +123,7 @@ class AGEM(SAC):
                 rews=episodic_batch["rews"],
                 done=tf.convert_to_tensor(episodic_batch["done"]),
             )
-            gradients, violation = self.agem_helper.adjust_gradients(
-                gradients, ref_gradients
-            )
+            gradients, violation = self.agem_helper.adjust_gradients(gradients, ref_gradients)
             metrics["agem_violation"] = violation
 
         return gradients, metrics

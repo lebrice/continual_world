@@ -9,13 +9,14 @@ class ReplayBuffer:
   A simple FIFO experience replay buffer for SAC agents.
   """
 
-  def __init__(self, obs_dim: int, act_dim: int, size: int):
+  def __init__(self, obs_dim: int, act_dim: int, size: int, seed: int = None):
     self.obs1_buf = np.zeros([size, obs_dim], dtype=np.float32)
     self.obs2_buf = np.zeros([size, obs_dim], dtype=np.float32)
     self.acts_buf = np.zeros([size, act_dim], dtype=np.float32)
     self.rews_buf = np.zeros(size, dtype=np.float32)
     self.done_buf = np.zeros(size, dtype=np.float32)
     self.ptr, self.size, self.max_size = 0, 0, size
+    self.rng = np.random.default_rng(seed=seed)
 
   def store(self, obs, act, rew, next_obs, done):
     self.obs1_buf[self.ptr] = obs
@@ -29,7 +30,8 @@ class ReplayBuffer:
   def sample_batch(self, batch_size: int) -> BatchDict:
     # TODO: What to do if the `batch_size` is larger than self.size?
     # NOTE: This doesn't happen in the CW10/CW20 case, since each task has 1M steps.
-    idxs = np.random.randint(0, self.size, size=batch_size)
+    # idxs = np.random.randint(0, self.size, size=batch_size)
+    idxs = self.rng.integers(low=0, high=self.size, size=batch_size)
     return dict(obs1=tf.convert_to_tensor(self.obs1_buf[idxs]),
                 obs2=tf.convert_to_tensor(self.obs2_buf[idxs]),
                 acts=tf.convert_to_tensor(self.acts_buf[idxs]),
@@ -42,13 +44,14 @@ class EpisodicMemory:
   Buffer which does not support overwriting old samples
   """
 
-  def __init__(self, obs_dim: int, act_dim: int, size: int):
+  def __init__(self, obs_dim: int, act_dim: int, size: int, seed: int = None):
     self.obs1_buf = np.zeros([size, obs_dim], dtype=np.float32)
     self.obs2_buf = np.zeros([size, obs_dim], dtype=np.float32)
     self.acts_buf = np.zeros([size, act_dim], dtype=np.float32)
     self.rews_buf = np.zeros(size, dtype=np.float32)
     self.done_buf = np.zeros(size, dtype=np.float32)
     self.size, self.max_size = 0, size
+    self.rng = np.random.default_rng(seed=seed)
 
   def store_multiple(self, obs1, acts, rews, obs2, done):
     assert len(obs1) == len(acts) == len(rews) == len(obs2) == len(done)
@@ -65,7 +68,8 @@ class EpisodicMemory:
 
   def sample_batch(self, batch_size) -> BatchDict:
     batch_size = min(batch_size, self.size)
-    idxs = np.random.choice(self.size, size=batch_size, replace=False)
+    # idxs = np.random.choice(self.size, size=batch_size, replace=False)
+    idxs = self.rng.choice(self.size, size=batch_size, replace=False)
     return dict(obs1=tf.convert_to_tensor(self.obs1_buf[idxs]),
                 obs2=tf.convert_to_tensor(self.obs2_buf[idxs]),
                 acts=tf.convert_to_tensor(self.acts_buf[idxs]),
@@ -78,9 +82,10 @@ class ReservoirReplayBuffer(ReplayBuffer):
   Buffer for SAC agents implementing reservoir sampling.
   """
 
-  def __init__(self, obs_dim, act_dim, size):
+  def __init__(self, obs_dim, act_dim, size: int, seed: int = None):
     super().__init__(obs_dim, act_dim, size)
     self.timestep = 0
+    self.rng = np.random.default_rng(seed=seed)
 
   def store(self, obs, act, rew, next_obs, done):
     current_t = self.timestep
@@ -93,7 +98,7 @@ class ReservoirReplayBuffer(ReplayBuffer):
       # If the buffer is full, first sample a value in the interval [0, t]
       # If that valus is in range [0, self.max_size], store the sample
       # Otherwise, discard it.
-      buffer_idx = random.randint(0, current_t)
+      buffer_idx = self.rng.integers(low=0, high=current_t)
       if buffer_idx >= self.max_size:
         return
 
